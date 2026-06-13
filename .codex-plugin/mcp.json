@@ -1,0 +1,9 @@
+{
+  "faa-aircraft-registry-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/faa-aircraft-registry-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}

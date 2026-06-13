@@ -1,0 +1,35 @@
+{
+  "manifest_version": "0.3",
+  "name": "faa-aircraft-registry-mcp-server",
+  "version": "0.1.0",
+  "description": "Offline, keyless lookup of the US civil aircraft registry (FAA Releasable Aircraft Database) — decode an N-number to aircraft, engine, status, and owner; search by owner, type, or state.",
+  "author": { "name": "cyanheads" },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_AUTH_MODE": "none",
+        "NODE_ENV": "production",
+        "FAA_REDACT_OWNER_PII": "${user_config.faa_redact_owner_pii}"
+      }
+    }
+  },
+  "compatibility": {
+    "runtimes": { "node": ">=24.0.0" }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "user_config": {
+    "faa_redact_owner_pii": {
+      "type": "string",
+      "title": "Redact owner PII",
+      "description": "Redact registrant name/address and disable owner-name search. Keep 'true' (the safe default) for shared use; set 'false' only on a trusted personal install to expose full owner detail.",
+      "default": "true",
+      "required": false
+    }
+  }
+}

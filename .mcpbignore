@@ -1,0 +1,19 @@
+# Runtime SQLite mirror index (~200 MB, built by mirror:init). Never bundled —
+# end users run mirror:init themselves. Excluded here so `mcpb pack` cannot bake
+# the local .db into the .mcpb the way a root-only ignore pattern would miss.
+/.mirror/
+*.db
+*.db-wal
+*.db-shm
+.env*
+.mcpregistry_*
+/.claude/
+/.agents/
+/skills/
+/Dockerfile
+/bun.lock
+/bunfig.toml
+/wrangler.toml
+/biome.json
+/tsconfig*.json
+/vitest.config.ts

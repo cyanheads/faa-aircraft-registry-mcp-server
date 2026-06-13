@@ -1,0 +1,91 @@
+# =============================================================================
+# OPERATING SYSTEM FILES
+# =============================================================================
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# IDE AND EDITOR FILES
+# =============================================================================
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.history/
+
+# =============================================================================
+# NODE.JS & PACKAGE MANAGERS
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# =============================================================================
+# TYPESCRIPT & BUILD
+# =============================================================================
+dist/
+*.tsbuildinfo
+.tsbuildinfo
+.tsbuildinfo.scripts
+*.js.map
+*.d.ts.map
+*.tgz
+
+# =============================================================================
+# TESTING & COVERAGE
+# =============================================================================
+coverage/
+!coverage/coverage-final.json
+
+# =============================================================================
+# LOGS & DATABASES
+# =============================================================================
+*.log
+*.sqlite
+*.sqlite3
+logs/
+
+# =============================================================================
+# CACHE & TEMPORARY FILES
+# =============================================================================
+.cache/
+.parcel-cache/
+
+# =============================================================================
+# ENVIRONMENT & CONFIGURATION
+# =============================================================================
+.env
+.env.local
+.env.*.local
+.wrangler
+worker-configuration.d.ts
+
+# =============================================================================
+# APPLICATION SPECIFIC
+# =============================================================================
+.storage/
+repomix-output*
+data/
+docs/api/
+docs/devdocs.md
+
+# FAA SQLite mirror index — runtime state built by `mirror:init` (default
+# FAA_MIRROR_PATH=.mirror/faa-registry.db). Large (~200 MB) and rebuilt from the
+# FAA ZIP, never committed or bundled; end users run mirror:init themselves.
+.mirror/
+*.db
+*.db-wal
+*.db-shm
+.mcp.json
+.claude/
+.agents/
+.mcpregistry_github_token
+.mcpregistry_registry_token
+
+# Internal design brief (catalog frontmatter) — local only, not for public repo
+docs/idea.md

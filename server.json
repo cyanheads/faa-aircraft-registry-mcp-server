@@ -1,0 +1,141 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.cyanheads/faa-aircraft-registry-mcp-server",
+  "description": "Offline, keyless lookup of the US civil aircraft registry — decode N-numbers, search records.",
+  "repository": {
+    "url": "https://github.com/cyanheads/faa-aircraft-registry-mcp-server",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@cyanheads/faa-aircraft-registry-mcp-server",
+      "runtimeHint": "node",
+      "version": "0.1.0",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "run"
+        },
+        {
+          "type": "positional",
+          "value": "start:stdio"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "FAA_REDACT_OWNER_PII",
+          "description": "Redact owner name/address and disable owner-name search. Redacted by default; set to false only on trusted local installs. Unset/empty/malformed resolves to redacted.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
+          "name": "FAA_MIRROR_PATH",
+          "description": "Filesystem path to the SQLite registry index file.",
+          "format": "string",
+          "isRequired": false,
+          "default": ".mirror/faa-registry.db"
+        },
+        {
+          "name": "FAA_DATABASE_URL",
+          "description": "Source URL for the FAA Releasable Aircraft Database ZIP (used by mirror:init/refresh only).",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://registry.faa.gov/database/ReleasableAircraft.zip"
+        },
+        {
+          "name": "MCP_LOG_LEVEL",
+          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
+          "format": "string",
+          "isRequired": false,
+          "default": "info"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@cyanheads/faa-aircraft-registry-mcp-server",
+      "runtimeHint": "node",
+      "version": "0.1.0",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "run"
+        },
+        {
+          "type": "positional",
+          "value": "start:http"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "FAA_REDACT_OWNER_PII",
+          "description": "Redact owner name/address and disable owner-name search. Redacted by default; set to false only on trusted local installs. Unset/empty/malformed resolves to redacted.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
+          "name": "FAA_MIRROR_PATH",
+          "description": "Filesystem path to the SQLite registry index file.",
+          "format": "string",
+          "isRequired": false,
+          "default": ".mirror/faa-registry.db"
+        },
+        {
+          "name": "FAA_DATABASE_URL",
+          "description": "Source URL for the FAA Releasable Aircraft Database ZIP (used by mirror:init/refresh only).",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://registry.faa.gov/database/ReleasableAircraft.zip"
+        },
+        {
+          "name": "MCP_HTTP_HOST",
+          "description": "The hostname for the HTTP server.",
+          "format": "string",
+          "isRequired": false,
+          "default": "127.0.0.1"
+        },
+        {
+          "name": "MCP_HTTP_PORT",
+          "description": "The port to run the HTTP server on.",
+          "format": "string",
+          "isRequired": false,
+          "default": "3010"
+        },
+        {
+          "name": "MCP_HTTP_ENDPOINT_PATH",
+          "description": "The endpoint path for the MCP server.",
+          "format": "string",
+          "isRequired": false,
+          "default": "/mcp"
+        },
+        {
+          "name": "MCP_AUTH_MODE",
+          "description": "Authentication mode to use: 'none', 'jwt', or 'oauth'.",
+          "format": "string",
+          "isRequired": false,
+          "default": "none"
+        },
+        {
+          "name": "MCP_LOG_LEVEL",
+          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
+          "format": "string",
+          "isRequired": false,
+          "default": "info"
+        }
+      ],
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:3010/mcp"
+      }
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "faa-aircraft-registry-mcp-server",
+  "version": "0.1.0",
+  "description": "Offline, keyless MCP server for the US civil aircraft registry — decode an N-number to aircraft, engine, status, and owner; search by owner, type, or state.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/faa-aircraft-registry-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/faa-aircraft-registry-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "faa-aircraft-registry-mcp-server",
+    "shortDescription": "Offline, keyless MCP server for the US civil aircraft registry — decode an N-number to aircraft, engine, status, and owner; search by owner, type, or state.",
+    "longDescription": "Offline lookup of the US civil aircraft registry from the FAA's public-domain Releasable Aircraft Database, indexed locally as SQLite + FTS5. Decode an N-number to its aircraft, engine, year, status, and owner; search by owner, make/model, state, type, or Mode S code; decode manufacturer/engine codes to specs; and resolve active/deregistered/reserved status. Keyless with no runtime network. Owner PII is redacted by default.",
+    "developerName": "cyanheads",
+    "category": "government data",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/faa-aircraft-registry-mcp-server",
+    "defaultPrompt": []
+  }
+}
