@@ -1,7 +1,7 @@
 {
   "name": "faa-aircraft-registry-mcp-server",
   "version": "0.1.0",
-  "description": "Offline, keyless MCP server for the US civil aircraft registry — decode an N-number to aircraft, engine, status, and owner; search by owner, type, or state.",
+  "description": "Decode N-numbers to aircraft, engine, status, and owner, and search the US civil aircraft registry by owner, type, or state — offline, keyless.",
   "author": {
     "name": "cyanheads"
   },

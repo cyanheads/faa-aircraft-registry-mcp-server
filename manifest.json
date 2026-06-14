@@ -1,9 +1,13 @@
 {
   "manifest_version": "0.3",
   "name": "faa-aircraft-registry-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Offline, keyless lookup of the US civil aircraft registry (FAA Releasable Aircraft Database) — decode an N-number to aircraft, engine, status, and owner; search by owner, type, or state.",
   "author": { "name": "cyanheads" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cyanheads/faa-aircraft-registry-mcp-server"
+  },
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",

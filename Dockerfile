@@ -42,7 +42,7 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="faa-aircraft-registry-mcp-server"
-LABEL org.opencontainers.image.description="Offline, keyless MCP server for the US civil aircraft registry (FAA Releasable Aircraft Database) — decode an N-number to aircraft, engine, status, and owner; search by owner, type, or state."
+LABEL org.opencontainers.image.description="Decode N-numbers to aircraft, engine, status, and owner, and search the US civil aircraft registry (FAA Releasable Aircraft Database) by owner, type, or state — offline and keyless over an embedded SQLite + FTS5 mirror, with fail-safe owner-PII redaction."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/faa-aircraft-registry-mcp-server"

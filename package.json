@@ -1,8 +1,8 @@
 {
   "name": "@cyanheads/faa-aircraft-registry-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "mcpName": "io.github.cyanheads/faa-aircraft-registry-mcp-server",
-  "description": "Offline, keyless MCP server for the US civil aircraft registry (FAA Releasable Aircraft Database) — decode an N-number to aircraft, engine, status, and owner; search by owner, type, or state; resolve active/deregistered/reserved status. Embedded SQLite + FTS5, fail-safe owner-PII redaction.",
+  "description": "Decode N-numbers to aircraft, engine, status, and owner, and search the US civil aircraft registry (FAA Releasable Aircraft Database) by owner, type, or state — offline and keyless over an embedded SQLite + FTS5 mirror, with fail-safe owner-PII redaction.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -112,7 +112,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.0",
     "@types/node": "25.9.3",
-    "better-sqlite3": "^12.0.0",
+    "better-sqlite3": "^12.10.1",
     "depcheck": "^1.4.7",
     "ignore": "^7.0.5",
     "tsc-alias": "^1.8.17",
