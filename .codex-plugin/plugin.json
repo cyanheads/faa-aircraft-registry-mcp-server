@@ -1,6 +1,6 @@
 {
   "name": "faa-aircraft-registry-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Decode N-numbers to aircraft, engine, status, and owner, and search the US civil aircraft registry by owner, type, or state — offline, keyless.",
   "author": {
     "name": "cyanheads",
