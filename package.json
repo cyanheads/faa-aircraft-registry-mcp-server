@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/faa-aircraft-registry-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "mcpName": "io.github.cyanheads/faa-aircraft-registry-mcp-server",
   "description": "Decode N-numbers to aircraft, engine, status, and owner, and search the US civil aircraft registry (FAA Releasable Aircraft Database) by owner, type, or state — offline and keyless over an embedded SQLite + FTS5 mirror, with fail-safe owner-PII redaction.",
   "type": "module",
@@ -117,7 +117,7 @@
     "ignore": "^7.0.5",
     "tsc-alias": "^1.8.17",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.9"
   },
   "trustedDependencies": ["better-sqlite3"]
 }
