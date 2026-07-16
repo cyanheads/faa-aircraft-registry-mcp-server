@@ -92,7 +92,10 @@ describe('RegistryService — owner-PII redaction gate', () => {
 
   it('omits ownerName from search summaries when redaction is ON', async () => {
     const service = await makeService(true);
-    const page = await service.searchRegistrations({ makeModel: 'cessna', limit: 25 }, ctx);
+    const page = await service.searchRegistrations(
+      { makeModel: 'cessna', limit: 25, offset: 0 },
+      ctx,
+    );
     expect(page.items.length).toBeGreaterThan(0);
     for (const item of page.items) {
       expect(item.ownerRedacted).toBe(true);
@@ -115,10 +118,13 @@ describe('RegistryService — owner-PII redaction gate', () => {
     // The service drops the ownerName term when redaction is on; a probe for a
     // known owner must not narrow to that owner's aircraft.
     const probed = await service.searchRegistrations(
-      { ownerName: 'JOHN Q PUBLIC', makeModel: 'cessna', limit: 25 },
+      { ownerName: 'JOHN Q PUBLIC', makeModel: 'cessna', limit: 25, offset: 0 },
       ctx,
     );
-    const plain = await service.searchRegistrations({ makeModel: 'cessna', limit: 25 }, ctx);
+    const plain = await service.searchRegistrations(
+      { makeModel: 'cessna', limit: 25, offset: 0 },
+      ctx,
+    );
     expect(probed.items.length).toBe(plain.items.length);
     await service.mirrorInstance.close();
   });
@@ -180,15 +186,192 @@ describe('RegistryService — search truncation disclosure', () => {
 
   it('flags truncated=true when the cap is hit', async () => {
     // Two Cessnas in the fixture; a limit of 1 must disclose truncation.
-    const page = await service.searchRegistrations({ makeModel: 'cessna', limit: 1 }, ctx);
+    const page = await service.searchRegistrations(
+      { makeModel: 'cessna', limit: 1, offset: 0 },
+      ctx,
+    );
     expect(page.items).toHaveLength(1);
     expect(page.truncated).toBe(true);
     expect(page.cap).toBe(1);
   });
 
   it('flags truncated=false when the result set fits under the cap', async () => {
-    const page = await service.searchRegistrations({ makeModel: 'cessna', limit: 25 }, ctx);
+    const page = await service.searchRegistrations(
+      { makeModel: 'cessna', limit: 25, offset: 0 },
+      ctx,
+    );
     expect(page.truncated).toBe(false);
+  });
+});
+
+/**
+ * Pagination is proven by reconstruction: walking a result set one page at a
+ * time must reproduce the single-call result exactly, in order. A merely
+ * "different-looking" page 2 is equally consistent with a correct walk and one
+ * that silently skips rows, so every assertion here is on row identity.
+ */
+describe('RegistryService — pagination', () => {
+  let service: RegistryService;
+  beforeEach(async () => {
+    service = await makeService(true);
+  });
+  afterEach(async () => {
+    await service.mirrorInstance.close();
+  });
+
+  it('reports the full match total on every page, not the page size', async () => {
+    const page = await service.searchRegistrations(
+      { makeModel: 'cessna', limit: 1, offset: 0 },
+      ctx,
+    );
+    expect(page.items).toHaveLength(1);
+    expect(page.totalCount).toBe(2);
+    expect(page.truncated).toBe(true);
+  });
+
+  it('reconstructs the whole registration result set from sequential pages', async () => {
+    const whole = await service.searchRegistrations(
+      { makeModel: 'cessna', limit: 2, offset: 0 },
+      ctx,
+    );
+    const first = await service.searchRegistrations(
+      { makeModel: 'cessna', limit: 1, offset: 0 },
+      ctx,
+    );
+    const second = await service.searchRegistrations(
+      { makeModel: 'cessna', limit: 1, offset: 1 },
+      ctx,
+    );
+    expect([...first.items, ...second.items].map((i) => i.nNumber)).toEqual(
+      whole.items.map((i) => i.nNumber),
+    );
+    expect(second.truncated).toBe(false);
+  });
+
+  it('returns an empty page — with the total intact — past the end of the matches', async () => {
+    const page = await service.searchRegistrations(
+      { makeModel: 'cessna', limit: 25, offset: 99 },
+      ctx,
+    );
+    expect(page.items).toHaveLength(0);
+    expect(page.totalCount).toBe(2);
+    expect(page.truncated).toBe(false);
+  });
+
+  it('reconstructs the whole aircraft-type result set from sequential pages', async () => {
+    // Three CESSNA rows, two sharing an identical mfr+model — a walk is only
+    // stable if the ORDER BY carries a unique tiebreaker.
+    const whole = await service.searchAircraftTypes({ query: 'cessna', limit: 25, offset: 0 }, ctx);
+    expect(whole.totalCount).toBe(3);
+
+    const walked: string[] = [];
+    for (let offset = 0; offset < whole.totalCount; offset++) {
+      const page = await service.searchAircraftTypes({ query: 'cessna', limit: 1, offset }, ctx);
+      walked.push(...page.items.map((i) => i.code));
+    }
+    expect(walked).toEqual(whole.items.map((i) => i.code));
+    expect(new Set(walked).size).toBe(3);
+  });
+
+  it('flags the last aircraft-type page as complete and reports the true total', async () => {
+    const last = await service.searchAircraftTypes({ query: 'cessna', limit: 2, offset: 2 }, ctx);
+    expect(last.items).toHaveLength(1);
+    expect(last.totalCount).toBe(3);
+    expect(last.truncated).toBe(false);
+  });
+});
+
+/**
+ * Free-text filters must match only the columns their name promises. The bug:
+ * makeModel/ownerName built one unqualified FTS expression, so both matched
+ * every indexed column — owner_name, other_names and city included — returning
+ * false positives and letting search probe the fields redaction withholds.
+ * Fixture anchor: N12345 has city = SEATTLE and no "SEATTLE" in make/model.
+ */
+describe('RegistryService — free-text filters are column-scoped', () => {
+  let service: RegistryService;
+  beforeEach(async () => {
+    service = await makeService(true);
+  });
+  afterEach(async () => {
+    await service.mirrorInstance.close();
+  });
+
+  it('does not match a city name through makeModel', async () => {
+    const page = await service.searchRegistrations(
+      { makeModel: 'SEATTLE', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(page.items).toHaveLength(0);
+    expect(page.totalCount).toBe(0);
+  });
+
+  it('still matches genuine make/model terms (no false negative from scoping)', async () => {
+    const page = await service.searchRegistrations(
+      { makeModel: 'cessna', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(page.items.map((i) => i.nNumber).sort()).toEqual(['12345', '5RP']);
+  });
+
+  /**
+   * The scope must cover every term, not just the first. `:` binds tighter than
+   * `AND`, so an unparenthesized `{make model} : "a" AND "b"` scopes only "a"
+   * and lets "b" match any column — city included.
+   */
+  it('scopes every term of a multi-term makeModel, not just the first', async () => {
+    const page = await service.searchRegistrations(
+      { makeModel: 'cessna SEATTLE', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(page.items).toHaveLength(0);
+  });
+
+  it('does not match a city name through ownerName when owner search is enabled', async () => {
+    const open = await makeService(false);
+    const page = await open.searchRegistrations(
+      { ownerName: 'SEATTLE', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(page.items).toHaveLength(0);
+    await open.mirrorInstance.close();
+  });
+
+  it('matches registrant and co-owner names through ownerName', async () => {
+    const open = await makeService(false);
+    const owner = await open.searchRegistrations(
+      { ownerName: 'public', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(owner.items.map((i) => i.nNumber)).toEqual(['12345']);
+    // JANE ROE is an other_names (co-owner) entry on N5RP.
+    const coOwner = await open.searchRegistrations(
+      { ownerName: 'JANE ROE', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(coOwner.items.map((i) => i.nNumber)).toEqual(['5RP']);
+    await open.mirrorInstance.close();
+  });
+
+  it('neutralizes FTS operators rather than letting them escape the column scope', async () => {
+    // Each is an attempt to close the column filter and re-open on city.
+    for (const makeModel of [
+      '") OR {city} : ("SEATTLE',
+      'SEATTLE"} : ("SEATTLE',
+      '{city} : SEATTLE',
+      'city : SEATTLE',
+      '-SEATTLE',
+      'SEATTLE*',
+    ]) {
+      const page = await service.searchRegistrations({ makeModel, limit: 25, offset: 0 }, ctx);
+      expect(page.items, `leaked via makeModel=${makeModel}`).toHaveLength(0);
+    }
+  });
+
+  it('treats a filter that escapes to no tokens as unmatchable, not as no filter', async () => {
+    const page = await service.searchRegistrations({ makeModel: '"""', limit: 25, offset: 0 }, ctx);
+    expect(page.items).toHaveLength(0);
+    expect(page.totalCount).toBe(0);
   });
 });
 
@@ -231,7 +414,7 @@ describe('RegistryService — sparse records and aircraft types', () => {
   });
 
   it('finds aircraft types by name via FTS', async () => {
-    const page = await service.searchAircraftTypes({ query: 'cessna', limit: 25 }, ctx);
+    const page = await service.searchAircraftTypes({ query: 'cessna', limit: 25, offset: 0 }, ctx);
     expect(page.items.some((i) => i.code === '2072714')).toBe(true);
   });
 

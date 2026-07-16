@@ -32,8 +32,11 @@ import { createFaaIngester } from './ingest.js';
 import { cleanField, displayNNumber, normalizeNNumber, toFtsMatch } from './normalize.js';
 import {
   AIRCRAFT_REF_FTS,
+  AIRCRAFT_REF_FTS_COLUMNS,
   AIRCRAFT_REF_TABLE,
   DEREG_TABLE,
+  MAKE_MODEL_FTS_COLUMNS,
+  OWNER_FTS_COLUMNS,
   RESERVED_TABLE,
   registrationStoreSpec,
 } from './schema.js';
@@ -152,10 +155,21 @@ export class RegistryService {
     await this.assertReady();
     const structured: QueryFilter[] = [];
     const matchTerms: string[] = [];
+    /**
+     * A free-text filter whose tokens all escape away (e.g. `"""`) can never
+     * match. Short-circuit to an empty page rather than dropping the term, which
+     * would silently widen the search to every row.
+     */
+    let unmatchable = false;
+    const pushMatch = (text: string, columns: readonly string[]): void => {
+      const clause = toFtsMatch(text, columns);
+      if (clause) matchTerms.push(clause);
+      else unmatchable = true;
+    };
 
-    if (filters.makeModel) matchTerms.push(toFtsMatch(filters.makeModel));
+    if (filters.makeModel) pushMatch(filters.makeModel, MAKE_MODEL_FTS_COLUMNS);
     if (filters.ownerName && this.ownerSearchEnabled)
-      matchTerms.push(toFtsMatch(filters.ownerName));
+      pushMatch(filters.ownerName, OWNER_FTS_COLUMNS);
     if (filters.state)
       structured.push({ column: 'state', op: 'eq', value: filters.state.trim().toUpperCase() });
     if (filters.aircraftType) {
@@ -178,19 +192,25 @@ export class RegistryService {
       match,
       structured: structured.length,
       limit: filters.limit,
+      offset: filters.offset,
+      unmatchable,
     });
+
+    if (unmatchable) return { items: [], truncated: false, cap: filters.limit, totalCount: 0 };
 
     const result = await this.mirror.query({
       ...(match ? { match } : {}),
       ...(structured.length > 0 ? { filters: structured } : {}),
       limit: filters.limit,
-      offset: 0,
+      offset: filters.offset,
     });
 
+    const items = result.rows.map((row) => this.toRegistrationSummary(row));
     return {
-      items: result.rows.map((row) => this.toRegistrationSummary(row)),
-      truncated: result.total > filters.limit,
+      items,
+      truncated: filters.offset + items.length < result.total,
       cap: filters.limit,
+      totalCount: result.total,
     };
   }
 
@@ -205,10 +225,13 @@ export class RegistryService {
     const params: (string | number)[] = [];
 
     if (filters.query) {
+      const clause = toFtsMatch(filters.query, AIRCRAFT_REF_FTS_COLUMNS);
+      // A query that escapes to nothing can never match — see searchRegistrations.
+      if (!clause) return { items: [], truncated: false, cap: filters.limit, totalCount: 0 };
       where.push(
         `code IN (SELECT code FROM ${AIRCRAFT_REF_FTS} WHERE ${AIRCRAFT_REF_FTS} MATCH ?)`,
       );
-      params.push(toFtsMatch(filters.query));
+      params.push(clause);
     }
     if (filters.aircraftType) {
       where.push('aircraft_type_code = ?');
@@ -220,21 +243,31 @@ export class RegistryService {
     }
 
     const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
-    ctx.log.debug('Searching aircraft types', { conditions: where.length, limit: filters.limit });
+    ctx.log.debug('Searching aircraft types', {
+      conditions: where.length,
+      limit: filters.limit,
+      offset: filters.offset,
+    });
 
     const countRow = handle
       .prepare<{ n: number }>(`SELECT COUNT(*) AS n FROM ${AIRCRAFT_REF_TABLE} ${whereSql}`)
       .get(...params);
     const total = countRow?.n ?? 0;
 
+    // `code` (the primary key) breaks ties on mfr+model — without it the order of
+    // equal-key rows is unspecified, so paged calls could repeat or skip rows.
     const rows = handle
-      .prepare<Row>(`SELECT * FROM ${AIRCRAFT_REF_TABLE} ${whereSql} ORDER BY mfr, model LIMIT ?`)
-      .all(...params, filters.limit);
+      .prepare<Row>(
+        `SELECT * FROM ${AIRCRAFT_REF_TABLE} ${whereSql} ORDER BY mfr, model, code LIMIT ? OFFSET ?`,
+      )
+      .all(...params, filters.limit, filters.offset);
 
+    const items = rows.map((row) => this.toAircraftTypeSummary(row));
     return {
-      items: rows.map((row) => this.toAircraftTypeSummary(row)),
-      truncated: total > filters.limit,
+      items,
+      truncated: filters.offset + items.length < total,
       cap: filters.limit,
+      totalCount: total,
     };
   }
 

@@ -27,7 +27,8 @@ export function tempDbPath(): string {
  * - N99SP (99SP): active but deliberately sparse (no year, no cruise speed, no owner name).
  * - N404ER (404ER): deregistered only.
  * - N777RZ (777RZ): reserved only.
- * Plus ACFTREF 2072714 (Cessna 172S) and 1234567 (sparse), ENGINE 41514 (Lycoming).
+ * Plus ACFTREF 2072714 / 2072715 (both Cessna 172S — an intentional mfr+model tie),
+ * 2072716 (Cessna 182T) and 1234567 (sparse), ENGINE 41514 (Lycoming).
  */
 export async function buildFixtureDb(path: string): Promise<void> {
   const spec = registrationStoreSpec(path);
@@ -215,12 +216,30 @@ export async function buildFixtureDb(path: string): Promise<void> {
         null,
       );
 
-    handle
-      .prepare(`INSERT INTO aircraft_ref_fts (code, mfr, model) VALUES (?, ?, ?)`)
-      .run('2072714', 'CESSNA', '172S');
-    handle
-      .prepare(`INSERT INTO aircraft_ref_fts (code, mfr, model) VALUES (?, ?, ?)`)
-      .run('1234567', 'SPARSE AERO', 'MODEL X');
+    /**
+     * Two more CESSNA reference rows so aircraft-type search has enough matches
+     * to page through. 2072715 deliberately shares 2072714's exact mfr+model:
+     * `ORDER BY mfr, model` alone leaves that pair's relative order unspecified,
+     * so paged calls could repeat or skip a row — the `code` tiebreaker is what
+     * makes the walk stable, and this pair is what proves it.
+     */
+    const refRow = handle.prepare(
+      `INSERT INTO aircraft_ref (
+          code, mfr, model, aircraft_type_code, engine_type_code, category_code,
+          builder_cert_code, num_engines, num_seats, weight_class, cruise_speed,
+          tc_data_sheet, tc_data_holder
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    refRow.run('2072715', 'CESSNA', '172S', '4', '1', '1', '0', 1, 4, 'CLASS 1', 126, '3A12', null);
+    refRow.run('2072716', 'CESSNA', '182T', '4', '1', '1', '0', 1, 4, 'CLASS 1', 145, '3A13', null);
+
+    const refFts = handle.prepare(
+      `INSERT INTO aircraft_ref_fts (code, mfr, model) VALUES (?, ?, ?)`,
+    );
+    refFts.run('2072714', 'CESSNA', '172S');
+    refFts.run('1234567', 'SPARSE AERO', 'MODEL X');
+    refFts.run('2072715', 'CESSNA', '172S');
+    refFts.run('2072716', 'CESSNA', '182T');
 
     handle
       .prepare(

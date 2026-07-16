@@ -64,14 +64,17 @@ describe('faa_search_registrations — redaction-gated owner search', () => {
   it('throws owner_search_disabled when redaction is ON and ownerName is supplied', async () => {
     await initService(true);
     await expect(
-      searchRegistrationsTool.handler({ ownerName: 'JOHN Q PUBLIC', limit: 25 }, searchCtx),
+      searchRegistrationsTool.handler(
+        { ownerName: 'JOHN Q PUBLIC', limit: 25, offset: 0 },
+        searchCtx,
+      ),
     ).rejects.toMatchObject({ data: { reason: 'owner_search_disabled' } });
   });
 
   it('allows owner search when redaction is OFF', async () => {
     await initService(false);
     const out = await searchRegistrationsTool.handler(
-      { ownerName: 'public', limit: 25 },
+      { ownerName: 'public', limit: 25, offset: 0 },
       searchCtx,
     );
     expect(out.registrations.some((r) => r.nNumber === '12345')).toBe(true);
@@ -79,7 +82,9 @@ describe('faa_search_registrations — redaction-gated owner search', () => {
 
   it('throws no_filters when no filter is supplied', async () => {
     await initService(true);
-    await expect(searchRegistrationsTool.handler({ limit: 25 }, searchCtx)).rejects.toMatchObject({
+    await expect(
+      searchRegistrationsTool.handler({ limit: 25, offset: 0 }, searchCtx),
+    ).rejects.toMatchObject({
       data: { reason: 'no_filters' },
     });
   });
@@ -98,47 +103,105 @@ describe('faa_search_registrations — enrichment / effective-output parity', ()
     searchRegistrationsTool.enrichment ?? {},
   );
 
-  it('produces effective output that parses when the result set is NOT truncated', async () => {
-    await initService(true);
-    const enrichCtx = createMockContext({
+  /** A fresh enrichment-collecting context for the search tool. */
+  const freshCtx = () =>
+    createMockContext({
       errors: searchRegistrationsTool.errors,
       enrichment: searchRegistrationsTool.enrichment,
     });
+
+  it('produces effective output that parses when the result set is NOT truncated', async () => {
+    await initService(true);
+    const enrichCtx = freshCtx();
     const out = await searchRegistrationsTool.handler(
-      { makeModel: 'cessna', limit: 25 },
+      { makeModel: 'cessna', limit: 25, offset: 0 },
       enrichCtx,
     );
     const effective = { ...out, ...getEnrichment(enrichCtx) };
     expect(() => effectiveSchema.parse(effective)).not.toThrow();
     // Truncation fields stay absent (optional) when the cap was not hit.
     expect(effective).not.toHaveProperty('truncated');
+    // nextOffset is optional and must stay absent when no page follows.
+    expect(effective).not.toHaveProperty('nextOffset');
+    // totalCount is required — it must be present even here.
+    expect(effective).toMatchObject({ totalCount: 2 });
   });
 
   it('produces effective output that parses on an empty result (notice only)', async () => {
     await initService(true);
-    const enrichCtx = createMockContext({
-      errors: searchRegistrationsTool.errors,
-      enrichment: searchRegistrationsTool.enrichment,
-    });
+    const enrichCtx = freshCtx();
     const out = await searchRegistrationsTool.handler(
-      { makeModel: 'zzzznotarealmake', limit: 25 },
+      { makeModel: 'zzzznotarealmake', limit: 25, offset: 0 },
+      enrichCtx,
+    );
+    expect(out.registrations).toHaveLength(0);
+    const effective = { ...out, ...getEnrichment(enrichCtx) };
+    // The required totalCount must survive the zero-result path — the failure
+    // mode this describe block exists to catch.
+    expect(() => effectiveSchema.parse(effective)).not.toThrow();
+    expect(effective).toHaveProperty('notice');
+    expect(effective).toMatchObject({ totalCount: 0 });
+  });
+
+  it('populates truncated/shown/cap and nextOffset when the cap IS hit', async () => {
+    await initService(true);
+    const enrichCtx = freshCtx();
+    const out = await searchRegistrationsTool.handler(
+      { makeModel: 'cessna', limit: 1, offset: 0 },
+      enrichCtx,
+    );
+    const effective = { ...out, ...getEnrichment(enrichCtx) };
+    expect(() => effectiveSchema.parse(effective)).not.toThrow();
+    expect(effective).toMatchObject({
+      truncated: true,
+      shown: 1,
+      cap: 1,
+      totalCount: 2,
+      nextOffset: 1,
+    });
+  });
+
+  /**
+   * The truncation notice is guidance the agent will act on literally, so it
+   * must name the offset that actually retrieves the next page — not advise
+   * raising a limit that may already be at its maximum.
+   */
+  it('points the truncation notice at the next-page offset, and that offset works', async () => {
+    await initService(true);
+    const firstCtx = freshCtx();
+    const first = await searchRegistrationsTool.handler(
+      { makeModel: 'cessna', limit: 1, offset: 0 },
+      firstCtx,
+    );
+    const enrichment = getEnrichment(firstCtx);
+    expect(enrichment.notice).toContain('offset: 1');
+    expect(enrichment.notice).not.toMatch(/raise the cap/i);
+
+    // Follow the emitted guidance literally: it must return a new row.
+    const secondCtx = freshCtx();
+    const second = await searchRegistrationsTool.handler(
+      { makeModel: 'cessna', limit: 1, offset: enrichment.nextOffset as number },
+      secondCtx,
+    );
+    expect(second.registrations).toHaveLength(1);
+    expect(second.registrations[0]?.nNumber).not.toBe(first.registrations[0]?.nNumber);
+    // End of the set — no further page advertised.
+    expect(getEnrichment(secondCtx)).not.toHaveProperty('nextOffset');
+  });
+
+  it('reports the real total, not the page size, when offset runs past the end', async () => {
+    await initService(true);
+    const enrichCtx = freshCtx();
+    const out = await searchRegistrationsTool.handler(
+      { makeModel: 'cessna', limit: 25, offset: 99 },
       enrichCtx,
     );
     expect(out.registrations).toHaveLength(0);
     const effective = { ...out, ...getEnrichment(enrichCtx) };
     expect(() => effectiveSchema.parse(effective)).not.toThrow();
-    expect(effective).toHaveProperty('notice');
-  });
-
-  it('populates truncated/shown/cap when the cap IS hit', async () => {
-    await initService(true);
-    const enrichCtx = createMockContext({
-      errors: searchRegistrationsTool.errors,
-      enrichment: searchRegistrationsTool.enrichment,
-    });
-    await searchRegistrationsTool.handler({ makeModel: 'cessna', limit: 1 }, enrichCtx);
-    const enrichment = getEnrichment(enrichCtx);
-    expect(enrichment).toMatchObject({ truncated: true, shown: 1, cap: 1 });
+    expect(effective).toMatchObject({ totalCount: 2 });
+    // The empty-result notice must not claim nothing matched when 2 rows do.
+    expect(effective.notice).toContain('past the end');
   });
 });
 

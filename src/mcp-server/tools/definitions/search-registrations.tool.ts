@@ -1,10 +1,11 @@
 /**
  * @fileoverview faa_search_registrations — search active registrations by owner
- * name, make/model, state, aircraft type, or Mode S code. FTS5 over the bundled
- * index; results are decoded summaries carrying N-numbers for follow-up
- * faa_lookup_registration calls. Owner-name search is disabled when owner-PII
- * redaction is on (so the search input can't be used to confirm a person↔aircraft
- * link). Discloses truncation when the result set hits the limit.
+ * name, make/model, state, aircraft type, or Mode S code. FTS5 over the local
+ * on-disk index; results are decoded summaries carrying N-numbers for follow-up
+ * faa_lookup_registration calls. Free-text terms are column-scoped, so makeModel
+ * matches make/model only and never owner or city. Owner-name search is disabled
+ * when owner-PII redaction is on (so the search input can't be used to confirm a
+ * person↔aircraft link). Discloses the total match count and pages via offset.
  * @module mcp-server/tools/definitions/search-registrations.tool
  */
 
@@ -37,7 +38,7 @@ const registrationSummarySchema = z
 export const searchRegistrationsTool = tool('faa_search_registrations', {
   title: 'faa-aircraft-registry-mcp-server: search registrations',
   description:
-    'Search active US civil aircraft registrations by owner name, make/model, state, aircraft type, or Mode S (hex) code. Full-text search over the bundled registry; returns decoded summaries with N-numbers to drill into via faa_lookup_registration. At least one filter is required. Owner-name search is unavailable when this deployment redacts owner PII — search by make/model, state, aircraft type, or Mode S code instead. When the result count hits the limit, the response discloses truncation.',
+    'Search active US civil aircraft registrations by owner name, make/model, state, aircraft type, or Mode S (hex) code. Full-text search over the local registry index; returns decoded summaries with N-numbers to drill into via faa_lookup_registration. At least one filter is required. Owner-name search is unavailable when this deployment redacts owner PII — search by make/model, state, aircraft type, or Mode S code instead. Every response reports totalCount (all matches, not just this page); when more remain, it returns nextOffset — pass it back as offset to page forward.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -62,27 +63,48 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       .max(200)
       .default(25)
       .describe('Maximum number of results to return (1–200, default 25).'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Zero-based index of the first result to return — pass the nextOffset from a previous response, with identical filters, to page forward (default 0).',
+      ),
   }),
 
   output: z.object({
     registrations: z
       .array(registrationSummarySchema)
-      .describe('Matching registration summaries (up to limit).'),
+      .describe('Matching registration summaries for this page (up to limit).'),
   }),
 
   enrichment: {
+    totalCount: z
+      .number()
+      .describe('Total registrations matching the filters, across all pages. Always present.'),
+    nextOffset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset to request the next page; absent when this page reached the end of the matches.',
+      ),
     truncated: z
       .boolean()
       .optional()
-      .describe(
-        'Present and true only when the result set was capped at the limit — more matches exist.',
-      ),
-    shown: z.number().optional().describe('Number of results returned (present only when capped).'),
-    cap: z.number().optional().describe('The limit that was applied (present only when capped).'),
+      .describe('Present and true only when matches remain beyond this page.'),
+    shown: z
+      .number()
+      .optional()
+      .describe('Number of results on this page (present only when truncated is set).'),
+    cap: z
+      .number()
+      .optional()
+      .describe('The limit that was applied (present only when truncated is set).'),
     notice: z
       .string()
       .optional()
-      .describe('Guidance when no registrations matched the supplied filters.'),
+      .describe('Guidance when no registrations matched, or when more matches remain.'),
   },
 
   errors: [
@@ -131,17 +153,30 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
         ...(aircraftType ? { aircraftType } : {}),
         ...(modeSCode ? { modeSCode } : {}),
         limit: input.limit,
+        offset: input.offset,
       },
       ctx,
     );
 
+    // Always populated — a required enrichment field must survive every success
+    // path, including the zero-result one.
+    ctx.enrich.total(page.totalCount);
+    const nextOffset = input.offset + page.items.length;
+    if (page.truncated) ctx.enrich({ nextOffset });
+
     if (page.items.length === 0) {
       ctx.enrich.notice(
-        'No registrations matched the supplied filters. Broaden the make/model terms, verify the state or Mode S code, or remove a filter.',
+        page.totalCount > 0
+          ? `Offset ${input.offset} is past the end of this result set — ${page.totalCount} registrations match, but none remain at that offset. Retry with a lower offset.`
+          : 'No registrations matched the supplied filters. Broaden the make/model terms, verify the state or Mode S code, or remove a filter.',
       );
     }
     if (page.truncated) {
-      ctx.enrich.truncated({ shown: page.items.length, cap: page.cap });
+      ctx.enrich.truncated({
+        shown: page.items.length,
+        cap: page.cap,
+        guidance: `Showing ${page.items.length} of ${page.totalCount} matching registrations. Call faa_search_registrations again with the same filters and offset: ${nextOffset} for the next page.`,
+      });
     }
 
     return { registrations: page.items };

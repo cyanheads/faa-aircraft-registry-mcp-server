@@ -19,8 +19,24 @@ export const AIRCRAFT_REF_TABLE = 'aircraft_ref';
 export const ENGINE_REF_TABLE = 'engine_ref';
 export const DEREG_TABLE = 'dereg';
 export const RESERVED_TABLE = 'reserved';
-/** Auxiliary FTS index over aircraft_ref (contentless, manually maintained). */
+/** Auxiliary FTS index over aircraft_ref (its own fts5 table, populated by the ingester). */
 export const AIRCRAFT_REF_FTS = 'aircraft_ref_fts';
+
+/**
+ * Column scopes for user-supplied search terms. Every free-text filter is
+ * confined to the subset that matches its documented meaning — a make/model
+ * query must never reach `owner_name`, `other_names`, or `city`, which would
+ * both return false positives and let search probe the fields the owner-PII
+ * redaction gate withholds. Keep these in sync with the `fts:` list in
+ * {@link registrationStoreSpec} and the `aircraft_ref_fts` DDL in
+ * {@link ensureAuxiliaryTables}; the `fts:` order itself is schema-significant
+ * and must not be reordered to match these.
+ */
+export const MAKE_MODEL_FTS_COLUMNS = ['make', 'model'] as const;
+/** Owner-name scope — includes co-owner names, which are owner-name data. */
+export const OWNER_FTS_COLUMNS = ['owner_name', 'other_names'] as const;
+/** The searchable columns of `aircraft_ref_fts` (`code` is UNINDEXED). */
+export const AIRCRAFT_REF_FTS_COLUMNS = ['mfr', 'model'] as const;
 
 /**
  * The MirrorService primary-table spec. `registration` carries the pre-joined

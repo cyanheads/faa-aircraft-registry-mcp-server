@@ -2,7 +2,7 @@
  * @fileoverview faa_search_aircraft_types — search the aircraft reference table by
  * manufacturer/model name, aircraft type, or category to discover the 7-char
  * manufacturer/model codes and browse specs. Fills the discovery gap before
- * faa_get_aircraft_type. Discloses truncation when the result set hits the limit.
+ * faa_get_aircraft_type. Discloses the total match count and pages via offset.
  * @module mcp-server/tools/definitions/search-aircraft-types.tool
  */
 
@@ -34,7 +34,7 @@ const aircraftTypeSummarySchema = z
 export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
   title: 'faa-aircraft-registry-mcp-server: search aircraft types',
   description:
-    'Search the FAA aircraft reference table by manufacturer/model name (full-text), aircraft type code, or category code to discover 7-character manufacturer/model/series codes and browse specifications. Use this before faa_get_aircraft_type to find a code by name. At least one filter is required. When the result count hits the limit, the response discloses truncation.',
+    'Search the FAA aircraft reference table by manufacturer/model name (full-text), aircraft type code, or category code to discover 7-character manufacturer/model/series codes and browse specifications. Use this before faa_get_aircraft_type to find a code by name. At least one filter is required. Every response reports totalCount (all matches, not just this page); when more remain, it returns nextOffset — pass it back as offset to page forward.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -54,27 +54,48 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
       .max(200)
       .default(25)
       .describe('Maximum number of results to return (1–200, default 25).'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Zero-based index of the first result to return — pass the nextOffset from a previous response, with identical filters, to page forward (default 0).',
+      ),
   }),
 
   output: z.object({
     aircraftTypes: z
       .array(aircraftTypeSummarySchema)
-      .describe('Matching aircraft-reference summaries (up to limit).'),
+      .describe('Matching aircraft-reference summaries for this page (up to limit).'),
   }),
 
   enrichment: {
+    totalCount: z
+      .number()
+      .describe('Total aircraft types matching the filters, across all pages. Always present.'),
+    nextOffset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset to request the next page; absent when this page reached the end of the matches.',
+      ),
     truncated: z
       .boolean()
       .optional()
-      .describe(
-        'Present and true only when the result set was capped at the limit — more matches exist.',
-      ),
-    shown: z.number().optional().describe('Number of results returned (present only when capped).'),
-    cap: z.number().optional().describe('The limit that was applied (present only when capped).'),
+      .describe('Present and true only when matches remain beyond this page.'),
+    shown: z
+      .number()
+      .optional()
+      .describe('Number of results on this page (present only when truncated is set).'),
+    cap: z
+      .number()
+      .optional()
+      .describe('The limit that was applied (present only when truncated is set).'),
     notice: z
       .string()
       .optional()
-      .describe('Guidance when no aircraft types matched the supplied filters.'),
+      .describe('Guidance when no aircraft types matched, or when more matches remain.'),
   },
 
   errors: [
@@ -105,17 +126,30 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
         ...(aircraftType ? { aircraftType } : {}),
         ...(category ? { category } : {}),
         limit: input.limit,
+        offset: input.offset,
       },
       ctx,
     );
 
+    // Always populated — a required enrichment field must survive every success
+    // path, including the zero-result one.
+    ctx.enrich.total(page.totalCount);
+    const nextOffset = input.offset + page.items.length;
+    if (page.truncated) ctx.enrich({ nextOffset });
+
     if (page.items.length === 0) {
       ctx.enrich.notice(
-        'No aircraft types matched the supplied filters. Broaden the name query or verify the type/category code.',
+        page.totalCount > 0
+          ? `Offset ${input.offset} is past the end of this result set — ${page.totalCount} aircraft types match, but none remain at that offset. Retry with a lower offset.`
+          : 'No aircraft types matched the supplied filters. Broaden the name query or verify the type/category code.',
       );
     }
     if (page.truncated) {
-      ctx.enrich.truncated({ shown: page.items.length, cap: page.cap });
+      ctx.enrich.truncated({
+        shown: page.items.length,
+        cap: page.cap,
+        guidance: `Showing ${page.items.length} of ${page.totalCount} matching aircraft types. Call faa_search_aircraft_types again with the same filters and offset: ${nextOffset} for the next page.`,
+      });
     }
 
     return { aircraftTypes: page.items };

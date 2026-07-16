@@ -15,8 +15,8 @@ Releasable Aircraft Database, indexed on disk as SQLite + FTS5. Keyless, no runt
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `faa_lookup_registration` | The 80% tool. Decode one N-number to its full pre-joined record — aircraft make/model, engine, year, registered owner, airworthiness, and registration status. One call resolves the MASTER → ACFTREF → ENGINE join and decodes all coded fields. | `nNumber` (string, "N12345" or "12345") | `readOnlyHint: true`, `openWorldHint: false` |
-| `faa_search_registrations` | Search active registrations by owner name, make/model, state, aircraft type, or Mode S code. FTS5 over the bundled registry; results are decoded summaries with N-numbers for follow-up `faa_lookup_registration` calls. | `ownerName?`, `makeModel?`, `state?`, `aircraftType?`, `modeSCode?`, `limit?` | `readOnlyHint: true`, `openWorldHint: false` |
-| `faa_search_aircraft_types` | Search the aircraft reference table by manufacturer/model name, category, or aircraft type to discover manufacturer-model codes and browse specs. Fills the discovery gap before `faa_get_aircraft_type`. | `query?`, `aircraftType?`, `category?`, `limit?` | `readOnlyHint: true`, `openWorldHint: false` |
+| `faa_search_registrations` | Search active registrations by owner name, make/model, state, aircraft type, or Mode S code. FTS5 over the local registry index; results are decoded summaries with N-numbers for follow-up `faa_lookup_registration` calls. Free-text terms are column-scoped — `makeModel` matches `make`/`model` only, `ownerName` matches `owner_name`/`other_names` only. | `ownerName?`, `makeModel?`, `state?`, `aircraftType?`, `modeSCode?`, `limit?`, `offset?` | `readOnlyHint: true`, `openWorldHint: false` |
+| `faa_search_aircraft_types` | Search the aircraft reference table by manufacturer/model name, category, or aircraft type to discover manufacturer-model codes and browse specs. Fills the discovery gap before `faa_get_aircraft_type`. | `query?`, `aircraftType?`, `category?`, `limit?`, `offset?` | `readOnlyHint: true`, `openWorldHint: false` |
 | `faa_get_aircraft_type` | Decode a 7-char manufacturer/model/series code to aircraft specs — make, model, category, aircraft type, engine type, engine count, seats, weight class, cruise speed, type-certificate data. | `code` (7-char alphanumeric) | `readOnlyHint: true`, `openWorldHint: false` |
 | `faa_get_registration_status` | Resolve registration + airworthiness status for an N-number across all three status files — active (MASTER), deregistered (DEREG), reserved (RESERVED) — returning a definitive `recordType` instead of a not-found when a number is known-but-inactive. | `nNumber` (string, "N12345" or "12345") | `readOnlyHint: true`, `openWorldHint: false` |
 
@@ -123,9 +123,13 @@ and mostly not bulk-published. The `faa-` name makes the scope obvious.
   (redacted) default and never serves names/addresses; local/self-host installs opt into full
   detail. "Treat public surfaces as fully public" is satisfied by what the endpoint actually
   returns: aircraft identity, not owner PII. Ships to npm for local use either way.
-- **Truncation disclosure.** Search tools accept `limit`; when the cap is hit, disclose via
-  `ctx.enrich.truncated({ shown, cap })` so the agent never treats a partial result set as
-  complete.
+- **Truncation disclosure + pagination.** Search tools accept `limit` and `offset`. Every
+  response carries `totalCount` (via `ctx.enrich.total()`) so the agent never treats a partial
+  result set as complete; when the cap is hit, `ctx.enrich.truncated({ shown, cap, guidance })`
+  discloses the cut and names the concrete `nextOffset` to retrieve the rest. Every disclosed
+  omission therefore has a retrieval path — the ordering is total and stable across pages
+  (`registration.rowid` for registrations, `mfr, model, code` for aircraft types), so
+  sequential pages neither repeat nor skip rows.
 - **No DataCanvas.** This is a decode/search surface (find-the-record-then-drill-in over
   categorical metadata), not an analytical row set an agent would run SQL over. It fails the
   "earns its keep on shape, not size" gate. Inline results only.
@@ -163,9 +167,11 @@ the canonical "mirror a bulk upstream" case. Two competing framings from the bri
 
 - **Build the index out-of-band, never on server startup.** A `mirror:init` CLI script
   downloads `ReleasableAircraft.zip`, parses the thirteen `.txt` files (nine MASTER parts +
-  ACFTREF + ENGINE + DEREG + RESERVED), pre-joins, and writes the SQLite file. Run it during
-  Docker image build (or a one-shot job), so the image ships with a warm index and the server
-  starts instantly. Init is idempotent and resumable.
+  ACFTREF + ENGINE + DEREG + RESERVED), pre-joins, and writes the SQLite file. The index is
+  not bundled with the package or baked into the image: every install path — npm, Docker,
+  `.mcpb` — ships the mirror CLI and an empty `.mirror` dir, and the operator runs `mirror:init`
+  once before first query (under Docker, via `docker exec` after the container starts). Init is
+  idempotent and resumable.
 - **Refresh on a daily schedule.** Register `mirror:refresh` on a cron via `schedulerService`
   inside `setup()` (gated to HTTP transport so stdio operators run it out-of-band), aligned to
   the FAA's 11:30 PM Central re-release. A refresh rebuilds from the latest ZIP; the index
@@ -285,7 +291,7 @@ each branch validated separately so `format()`-parity holds per branch).
   fleet (`nhtsa_`, `fcc_`, `fema_`) and the self-descriptive server name. "FAA" is an
   unambiguous, well-known acronym for the domain; no descriptive suffix needed on the prefix
   (the `-aircraft-registry` lives in the server name, which gives agents the domain context).
-- **Data source = the FAA Releasable Aircraft Database, bundled on disk.** It is the *only*
+- **Data source = the FAA Releasable Aircraft Database, indexed on disk.** It is the *only*
   programmatic path — the FAA exposes no keyless JSON registry API; `registry.faa.gov` is a
   human web portal (verified read-only). Public domain (US Government work), daily-refreshed
   comma-delimited `.txt` files in one ZIP. The corpus changes daily but is queried far more

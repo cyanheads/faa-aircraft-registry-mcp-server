@@ -162,6 +162,8 @@ export interface RegistrationSearchFilters {
   limit: number;
   makeModel?: string;
   modeSCode?: string;
+  /** Zero-based index of the first row to return. */
+  offset: number;
   ownerName?: string;
   state?: string;
 }
@@ -171,15 +173,19 @@ export interface AircraftTypeSearchFilters {
   aircraftType?: string;
   category?: string;
   limit: number;
+  /** Zero-based index of the first row to return. */
+  offset: number;
   query?: string;
 }
 
-/** A result page that discloses truncation against the requested cap. */
+/** A result page that discloses truncation and the total against the requested cap. */
 export interface SearchPage<T> {
   /** The limit applied. */
   cap: number;
   items: T[];
-  /** True when the result set was capped at the limit. */
+  /** Total matches for the filters, across all pages (before limit/offset). */
+  totalCount: number;
+  /** True when rows remain beyond this page — i.e. `offset + items.length < totalCount`. */
   truncated: boolean;
 }
 
