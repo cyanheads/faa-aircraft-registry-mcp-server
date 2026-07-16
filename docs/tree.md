@@ -1,6 +1,6 @@
 # faa-aircraft-registry-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 11:31:57
+Generated on: 2026-07-16 06:04:26
 
 ```text
 faa-aircraft-registry-mcp-server/
@@ -11,10 +11,12 @@ faa-aircraft-registry-mcp-server/
 │   ├── mcp.json
 │   └── plugin.json
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .mirror/
 ├── .vscode/
 │   ├── extensions.json
@@ -171,6 +173,7 @@ faa-aircraft-registry-mcp-server/
 │       └── tools.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md
@@ -178,6 +181,7 @@ faa-aircraft-registry-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

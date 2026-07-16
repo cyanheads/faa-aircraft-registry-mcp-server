@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/faa-aircraft-registry-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Ffaa-aircraft-registry-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/faa-aircraft-registry-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/faa-aircraft-registry-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Ffaa-aircraft-registry-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/faa-aircraft-registry-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -78,8 +78,9 @@ Full-text search over active registrations, returning decoded summaries with N-n
 
 - Filter by `ownerName`, `makeModel`, `state`, `aircraftType`, or `modeSCode`; at least one filter is required
 - **Owner-name search is disabled when `FAA_REDACT_OWNER_PII` is on** — search by make/model, state, type, or Mode S code instead
+- Free-text terms are column-scoped: `makeModel` matches make/model only, never owner name or city
 - Each result carries an N-number to pass to `faa_lookup_registration` for full detail
-- Discloses truncation when the result count hits `limit` (1–200, default 25), so a partial result set is never mistaken for complete
+- Every response reports `totalCount` across all matches, so a partial result set is never mistaken for complete; page through it with `limit` (1–200, default 25) and `offset` — a truncated response names the `nextOffset` to request
 
 ---
 
@@ -89,7 +90,7 @@ Discover the 7-char manufacturer/model/series codes by name before decoding them
 
 - Filter by `query` (manufacturer/model name, full-text), `aircraftType` code, or `category` code; at least one filter is required
 - Returns reference summaries with the code to pass to `faa_get_aircraft_type`
-- Discloses truncation at the `limit` (1–200, default 25)
+- Every response reports `totalCount` across all matches; page through it with `limit` (1–200, default 25) and `offset` — a truncated response names the `nextOffset` to request
 
 ## Resources
 

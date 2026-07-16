@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-07-15 · 🛡️ Security
+
+Column-scopes faa_search_registrations FTS matching to close a PII-redaction bypass, adds offset pagination to both search tools, corrects 'bundled registry' description drift, and adopts mcp-ts-core ^0.10.14 with a bun install supply-chain guard.
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-06-20
 
 Maintenance: @cyanheads/mcp-ts-core ^0.10.6 → ^0.10.9, direct + transitive dependency refresh, re-synced agent skills and devcheck scripts, devcheck.config packaging.pluginManifests flag
