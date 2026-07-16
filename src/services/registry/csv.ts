@@ -5,6 +5,12 @@
  * honors double-quote escaping defensively so a quoted field with an embedded
  * comma can't shift every downstream column. Header-keyed rows tolerate the
  * FAA's occasional column reordering better than fixed character positions.
+ *
+ * Reads the raw entry `Buffer` directly, decoding one line at a time as latin1 —
+ * never a whole-file `.toString()` + `.split(/\r?\n/)`. For the multi-hundred-MB
+ * files (`DEREG.txt`, `MASTER.txt`) that keeps the per-file transient a single
+ * line wide instead of ~2–3× the file's bytes (a UTF-16 string plus a full line
+ * array), which is a primary lever on the ingest's peak memory.
  * @module services/registry/csv
  */
 
@@ -48,58 +54,47 @@ function splitLine(line: string): string[] {
   return fields;
 }
 
-/**
- * Strip a leading byte-order mark from the file content. The FAA ships every
- * `.txt` with a UTF-8 BOM (`EF BB BF`); decoded as latin1 (how the ingester reads
- * these files) that becomes the three characters `\xEF\xBB\xBF`, decoded as UTF-8
- * it's `﻿`. Either way it prefixes the very first header cell — so without
- * stripping it, the first column key becomes e.g. `﻿N-NUMBER` instead of
- * `N-NUMBER`, every `pick()` for that column misses, and the whole file silently
- * ingests zero rows.
- */
-function stripBom(content: string): string {
-  if (content.charCodeAt(0) === 0xfeff) return content.slice(1);
-  if (
-    content.charCodeAt(0) === 0xef &&
-    content.charCodeAt(1) === 0xbb &&
-    content.charCodeAt(2) === 0xbf
-  ) {
-    return content.slice(3);
-  }
-  return content;
-}
-
 /** Normalize a header cell to a stable lookup key: upper-case, collapsed spaces. */
 export function normalizeHeader(header: string): string {
   return header.trim().toUpperCase().replace(/\s+/g, ' ');
 }
 
 /**
- * Parse FAA `.txt` content into header-keyed rows. Yields one {@link CsvRow} per
- * data line (the header row drives the keys). Blank trailing lines are skipped.
- * Generator-based so a multi-megabyte MASTER part streams without materializing
- * every row at once.
+ * Yield the latin1-decoded lines of a raw FAA entry buffer one at a time,
+ * matching `String.prototype.split(/\r?\n/)` semantics: `\n` terminates a line,
+ * a `\r` is consumed only when it immediately precedes `\n`, and a lone `\r`
+ * stays in the line. A leading UTF-8 BOM (`EF BB BF`) — which every FAA `.txt`
+ * ships and which, decoded as latin1, would otherwise corrupt the first header
+ * cell — is stripped once at the start. Streaming so a large file never
+ * materializes as a single decoded string or a full array of lines.
  */
-export function* parseCsv(content: string): Generator<CsvRow> {
-  const lines = stripBom(content).split(/\r?\n/);
-
-  let headerLine: string | undefined;
-  let cursor = 0;
-  for (; cursor < lines.length; cursor++) {
-    const candidate = lines[cursor];
-    if (candidate !== undefined && candidate.trim() !== '') {
-      headerLine = candidate;
-      cursor++;
-      break;
+function* latin1Lines(buf: Buffer): Generator<string> {
+  let start = buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf ? 3 : 0;
+  const len = buf.length;
+  for (let i = start; i <= len; i++) {
+    if (i === len || buf[i] === 0x0a /* \n */) {
+      let end = i;
+      if (end > start && buf[end - 1] === 0x0d /* \r */) end--; // drop the \r of a \r\n
+      yield buf.toString('latin1', start, end);
+      start = i + 1;
     }
   }
-  if (headerLine === undefined) return;
+}
 
-  const headers = splitLine(headerLine).map(normalizeHeader);
-
-  for (let i = cursor; i < lines.length; i++) {
-    const line = lines[i];
-    if (line === undefined || line.trim() === '') continue;
+/**
+ * Parse FAA `.txt` bytes into header-keyed rows. Yields one {@link CsvRow} per
+ * data line (the header row drives the keys). Blank lines are skipped. Consumes
+ * the entry buffer as a stream (see {@link latin1Lines}) so a multi-megabyte
+ * file never materializes every row — or the whole decoded file — at once.
+ */
+export function* parseCsv(content: Buffer): Generator<CsvRow> {
+  let headers: string[] | undefined;
+  for (const line of latin1Lines(content)) {
+    if (line.trim() === '') continue;
+    if (headers === undefined) {
+      headers = splitLine(line).map(normalizeHeader);
+      continue;
+    }
     const cells = splitLine(line);
     const row: CsvRow = {};
     for (let c = 0; c < headers.length; c++) {
