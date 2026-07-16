@@ -6,6 +6,7 @@
  * @module tests/services/registry-service.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RegistryService } from '@/services/registry/registry-service.js';
@@ -56,7 +57,9 @@ describe('RegistryService — N-number normalization', () => {
   });
 
   it('returns undefined for a well-formed but unknown N-number', async () => {
-    expect(await service.lookupRegistration('N00000', ctx)).toBeUndefined();
+    // N99999 is shape-valid but absent from the fixture (N00000 would now be
+    // rejected as malformed — a real N-number never starts with 0).
+    expect(await service.lookupRegistration('N99999', ctx)).toBeUndefined();
   });
 });
 
@@ -169,9 +172,10 @@ describe('RegistryService — registration status resolution', () => {
   });
 
   it('resolves a never-issued number to recordType unknown (not an error)', async () => {
-    const s = await service.getRegistrationStatus('N00000', ctx);
+    // N99999: shape-valid but never issued. (N00000 is now a validation error.)
+    const s = await service.getRegistrationStatus('N99999', ctx);
     expect(s.recordType).toBe('unknown');
-    expect(s.nNumberDisplay).toBe('N00000');
+    expect(s.nNumberDisplay).toBe('N99999');
   });
 });
 
@@ -419,6 +423,116 @@ describe('RegistryService — sparse records and aircraft types', () => {
   });
 
   it('returns undefined for an unknown aircraft type code', async () => {
+    // 0000000 is shape-valid (a leading 0 is legitimate for aircraft codes) but absent.
     expect(await service.getAircraftType('0000000', ctx)).toBeUndefined();
+  });
+});
+
+/**
+ * The FAA encodes a blank/unknown value as literal `0` in several numeric spec
+ * columns. Those must render as absent, not as fabricated values (a "0 mph" cruise
+ * or a "year 0" aircraft) — except num_engines, where 0 is a real value for
+ * unpowered aircraft. The fixture's NULL rows (N99SP / code 1234567) exercise the
+ * already-correct NULL path; these rows exercise the literal-0 path specifically.
+ */
+describe('RegistryService — FAA zero-sentinel numeric fields (issue #1)', () => {
+  let service: RegistryService;
+  beforeEach(async () => {
+    service = await makeService(false);
+  });
+  afterEach(async () => {
+    await service.mirrorInstance.close();
+  });
+
+  it('maps year_mfr = 0 to an absent yearManufactured on a full record', async () => {
+    const r = await service.lookupRegistration('N105HH', ctx);
+    expect(r?.make).toBe('HILLER');
+    expect(r?.model).toBe('UH-12D');
+    expect(r?.yearManufactured).toBeUndefined();
+  });
+
+  it('blanks cruise_speed = 0 and num_seats = 0 but preserves a real num_engines', async () => {
+    const a = await service.getAircraftType('1370737', ctx);
+    expect(a?.numberOfEngines).toBe(2); // a real value — never a sentinel
+    expect(a?.cruiseSpeedMph).toBeUndefined();
+    expect(a?.numberOfSeats).toBeUndefined();
+  });
+
+  it('preserves num_engines = 0 on an unpowered aircraft while still blanking cruise_speed = 0', async () => {
+    const a = await service.getAircraftType('1500021', ctx);
+    expect(a?.aircraftType).toEqual({ code: '1', label: 'Glider' });
+    expect(a?.numberOfEngines).toBe(0); // 0 is real here — the LEAVE verdict, field-scoped coercion
+    expect(a?.numberOfSeats).toBe(2);
+    expect(a?.cruiseSpeedMph).toBeUndefined();
+  });
+
+  it('applies the coercion in search summaries too (year + seats blanked, engines preserved)', async () => {
+    const regs = await service.searchRegistrations(
+      { makeModel: 'hiller', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(regs.items.map((i) => i.nNumber)).toEqual(['105HH']);
+    expect(regs.items[0]?.yearManufactured).toBeUndefined();
+
+    const boeing = await service.searchAircraftTypes(
+      { query: 'boeing', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(boeing.items[0]?.numberOfSeats).toBeUndefined();
+    expect(boeing.items[0]?.numberOfEngines).toBe(2);
+
+    const glider = await service.searchAircraftTypes(
+      { query: 'schleicher', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(glider.items[0]?.numberOfEngines).toBe(0);
+  });
+});
+
+/**
+ * Malformed identifiers must be rejected as validation errors before a lookup
+ * turns them into a misleading not-found/unknown answer. Shape is checked in the
+ * service (shared by tools + the resource); the check happens before any DB read,
+ * so no fixture data is involved.
+ */
+describe('RegistryService — malformed identifier rejection (issue #5)', () => {
+  let service: RegistryService;
+  beforeEach(async () => {
+    service = await makeService(true);
+  });
+  afterEach(async () => {
+    await service.mirrorInstance.close();
+  });
+
+  it('rejects a malformed N-number from lookupRegistration with InvalidParams', async () => {
+    await expect(service.lookupRegistration('BANANA', ctx)).rejects.toBeInstanceOf(McpError);
+    await expect(service.lookupRegistration('BANANA', ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'invalid_n_number' },
+    });
+  });
+
+  it('rejects a malformed N-number from getRegistrationStatus (not a silent unknown)', async () => {
+    await expect(service.getRegistrationStatus('NBANANA', ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_n_number' },
+    });
+  });
+
+  it('rejects an N-number starting with 0 (a real registration never does)', async () => {
+    await expect(service.lookupRegistration('00000', ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_n_number' },
+    });
+  });
+
+  it('rejects a malformed aircraft code from getAircraftType', async () => {
+    await expect(service.getAircraftType('ABC', ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'invalid_code' },
+    });
+  });
+
+  it('accepts a shape-valid 6-character code — a real short code must not be over-rejected', async () => {
+    // Shape-valid but absent from the fixture → not-found (undefined), never a validation error.
+    expect(await service.getAircraftType('123456', ctx)).toBeUndefined();
   });
 });

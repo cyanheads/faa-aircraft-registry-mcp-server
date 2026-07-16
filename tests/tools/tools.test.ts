@@ -13,6 +13,7 @@ import { registrationResource } from '@/mcp-server/resources/definitions/registr
 import { getAircraftTypeTool } from '@/mcp-server/tools/definitions/get-aircraft-type.tool.js';
 import { getRegistrationStatusTool } from '@/mcp-server/tools/definitions/get-registration-status.tool.js';
 import { lookupRegistrationTool } from '@/mcp-server/tools/definitions/lookup-registration.tool.js';
+import { searchAircraftTypesTool } from '@/mcp-server/tools/definitions/search-aircraft-types.tool.js';
 import { searchRegistrationsTool } from '@/mcp-server/tools/definitions/search-registrations.tool.js';
 import { initRegistryService, resetRegistryService } from '@/services/registry/registry-service.js';
 import { buildFixtureDb, tempDbPath } from '../fixtures/build-fixture-db.js';
@@ -21,7 +22,7 @@ import { buildFixtureDb, tempDbPath } from '../fixtures/build-fixture-db.js';
 const lookupCtx = createMockContext({ errors: lookupRegistrationTool.errors });
 const searchCtx = createMockContext({ errors: searchRegistrationsTool.errors });
 const aircraftTypeCtx = createMockContext({ errors: getAircraftTypeTool.errors });
-const statusCtx = createMockContext();
+const statusCtx = createMockContext({ errors: getRegistrationStatusTool.errors });
 const resourceCtx = createMockContext({ errors: registrationResource.errors });
 
 /** Point the service singleton at a fresh fixture DB with the given redaction mode. */
@@ -48,15 +49,33 @@ describe('faa_lookup_registration', () => {
     expect(content[0]?.type).toBe('text');
   });
 
-  it('throws not_found (NotFound) for an unknown N-number', async () => {
+  it('throws not_found (NotFound) for a well-formed but unknown N-number', async () => {
+    // N99999 is shape-valid but absent; a malformed number now fails validation first.
     await expect(
-      lookupRegistrationTool.handler({ nNumber: 'N00000' }, lookupCtx),
+      lookupRegistrationTool.handler({ nNumber: 'N99999' }, lookupCtx),
     ).rejects.toBeInstanceOf(McpError);
     await expect(
-      lookupRegistrationTool.handler({ nNumber: 'N00000' }, lookupCtx),
+      lookupRegistrationTool.handler({ nNumber: 'N99999' }, lookupCtx),
     ).rejects.toMatchObject({
       data: { reason: 'not_found' },
     });
+  });
+
+  it('throws invalid_n_number (InvalidParams) with a recovery hint for a malformed N-number', async () => {
+    await expect(
+      lookupRegistrationTool.handler({ nNumber: 'BANANA' }, lookupCtx),
+    ).rejects.toMatchObject({
+      data: { reason: 'invalid_n_number', recovery: { hint: expect.stringContaining('N172SP') } },
+    });
+  });
+
+  it('omits a year_mfr = 0 from the record and the formatted headline', async () => {
+    const out = await lookupRegistrationTool.handler({ nNumber: 'N105HH' }, lookupCtx);
+    expect(out.yearManufactured).toBeUndefined();
+    const text = lookupRegistrationTool.format?.(out)[0]?.text ?? '';
+    // Headline must read "HILLER UH-12D", never "0 HILLER UH-12D".
+    expect(text).toContain('HILLER UH-12D');
+    expect(text).not.toContain('0 HILLER');
   });
 });
 
@@ -205,16 +224,101 @@ describe('faa_search_registrations — enrichment / effective-output parity', ()
   });
 });
 
+/**
+ * faa_search_aircraft_types has the same required-totalCount enrichment contract
+ * as faa_search_registrations, so it carries the same SerializationError risk: a
+ * required enrichment field that isn't populated on every success path fails the
+ * effective-output parse. This mirrors the search-registrations parity block for
+ * the aircraft-types surface, which had no tool-level guard.
+ */
+describe('faa_search_aircraft_types — enrichment / effective-output parity', () => {
+  const effectiveSchema = searchAircraftTypesTool.output.extend(
+    searchAircraftTypesTool.enrichment ?? {},
+  );
+
+  const freshCtx = () =>
+    createMockContext({
+      errors: searchAircraftTypesTool.errors,
+      enrichment: searchAircraftTypesTool.enrichment,
+    });
+
+  it('produces effective output that parses when the result set is NOT truncated', async () => {
+    await initService(true);
+    const enrichCtx = freshCtx();
+    const out = await searchAircraftTypesTool.handler(
+      { query: 'cessna', limit: 25, offset: 0 },
+      enrichCtx,
+    );
+    const effective = { ...out, ...getEnrichment(enrichCtx) };
+    expect(() => effectiveSchema.parse(effective)).not.toThrow();
+    expect(effective).not.toHaveProperty('truncated');
+    expect(effective).not.toHaveProperty('nextOffset');
+    // totalCount is required — it must survive the common under-cap path.
+    expect(effective).toMatchObject({ totalCount: 3 });
+  });
+
+  it('produces effective output that parses on an empty result (notice only)', async () => {
+    await initService(true);
+    const enrichCtx = freshCtx();
+    const out = await searchAircraftTypesTool.handler(
+      { query: 'zzzznotarealmodel', limit: 25, offset: 0 },
+      enrichCtx,
+    );
+    expect(out.aircraftTypes).toHaveLength(0);
+    const effective = { ...out, ...getEnrichment(enrichCtx) };
+    // The required totalCount must survive the zero-result path — the SerializationError guard.
+    expect(() => effectiveSchema.parse(effective)).not.toThrow();
+    expect(effective).toHaveProperty('notice');
+    expect(effective).toMatchObject({ totalCount: 0 });
+  });
+
+  it('populates truncated/shown/cap and nextOffset when the cap IS hit', async () => {
+    await initService(true);
+    const enrichCtx = freshCtx();
+    const out = await searchAircraftTypesTool.handler(
+      { query: 'cessna', limit: 1, offset: 0 },
+      enrichCtx,
+    );
+    const effective = { ...out, ...getEnrichment(enrichCtx) };
+    expect(() => effectiveSchema.parse(effective)).not.toThrow();
+    expect(effective).toMatchObject({
+      truncated: true,
+      shown: 1,
+      cap: 1,
+      totalCount: 3,
+      nextOffset: 1,
+    });
+  });
+});
+
 describe('faa_get_aircraft_type', () => {
   beforeAll(() => initService(true));
   afterAll(() => resetRegistryService());
 
-  it('throws not_found for an unknown code', async () => {
+  it('throws not_found for a well-formed but unknown code', async () => {
+    // 0000000 is shape-valid (leading 0 is legitimate for aircraft codes) but absent.
     await expect(
       getAircraftTypeTool.handler({ code: '0000000' }, aircraftTypeCtx),
     ).rejects.toMatchObject({
       data: { reason: 'not_found' },
     });
+  });
+
+  it('throws invalid_code for a malformed code', async () => {
+    await expect(
+      getAircraftTypeTool.handler({ code: 'ABC' }, aircraftTypeCtx),
+    ).rejects.toMatchObject({ data: { reason: 'invalid_code' } });
+  });
+
+  it('omits zero-sentinel cruise/seats from output and text, keeping a real engine count', async () => {
+    const out = await getAircraftTypeTool.handler({ code: '1370737' }, aircraftTypeCtx);
+    expect(out.numberOfEngines).toBe(2);
+    expect(out.cruiseSpeedMph).toBeUndefined();
+    expect(out.numberOfSeats).toBeUndefined();
+    const text = getAircraftTypeTool.format?.(out)[0]?.text ?? '';
+    expect(text).toContain('**Engines:** 2');
+    expect(text).not.toContain('Cruise speed');
+    expect(text).not.toContain('Seats:');
   });
 });
 
@@ -229,9 +333,16 @@ describe('faa_get_registration_status — flat discriminated output', () => {
     expect(dereg.recordType).toBe('deregistered');
     const reserved = await getRegistrationStatusTool.handler({ nNumber: '777RZ' }, statusCtx);
     expect(reserved.recordType).toBe('reserved');
-    const unknown = await getRegistrationStatusTool.handler({ nNumber: '00000' }, statusCtx);
+    // 99999 is shape-valid but never issued → unknown (00000 is now a validation error).
+    const unknown = await getRegistrationStatusTool.handler({ nNumber: '99999' }, statusCtx);
     expect(unknown.recordType).toBe('unknown');
     expect(getRegistrationStatusTool.format?.(reserved)[0]?.type).toBe('text');
+  });
+
+  it('throws invalid_n_number for a malformed number instead of a silent unknown', async () => {
+    await expect(
+      getRegistrationStatusTool.handler({ nNumber: 'BANANA' }, statusCtx),
+    ).rejects.toMatchObject({ data: { reason: 'invalid_n_number' } });
   });
 });
 
@@ -249,12 +360,21 @@ describe('faa://registration/{nNumber} resource', () => {
     expect(out.make).toBe('CESSNA');
   });
 
-  it('throws not_found for an unknown N-number', async () => {
+  it('throws not_found for a well-formed but unknown N-number', async () => {
     await expect(
       registrationResource.handler(
-        { nNumber: 'N00000' },
-        { ...resourceCtx, uri: new URL('faa://registration/N00000') },
+        { nNumber: 'N99999' },
+        { ...resourceCtx, uri: new URL('faa://registration/N99999') },
       ),
     ).rejects.toMatchObject({ data: { reason: 'not_found' } });
+  });
+
+  it('throws invalid_n_number for a malformed N-number', async () => {
+    await expect(
+      registrationResource.handler(
+        { nNumber: 'BANANA' },
+        { ...resourceCtx, uri: new URL('faa://registration/BANANA') },
+      ),
+    ).rejects.toMatchObject({ data: { reason: 'invalid_n_number' } });
   });
 });

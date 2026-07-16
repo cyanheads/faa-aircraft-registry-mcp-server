@@ -14,6 +14,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getRegistryService } from '@/services/registry/registry-service.js';
 import { codedValueSchema, renderCoded } from './_schemas.js';
 
@@ -28,7 +29,7 @@ export const getRegistrationStatusTool = tool('faa_get_registration_status', {
       .string()
       .min(1)
       .describe(
-        'US registration N-number to resolve. Accepts "N12345" or "12345"; the leading N is optional.',
+        'US registration N-number to resolve. Accepts "N12345" or "12345" (leading N optional). Shape: 1–5 characters — a leading digit 1–9, then digits, optionally ending in 1–2 letters (I and O are unused).',
       ),
   }),
 
@@ -96,6 +97,16 @@ export const getRegistrationStatusTool = tool('faa_get_registration_status', {
       .optional()
       .describe('The N-number this reservation changes to/from (reserved records).'),
   }),
+
+  errors: [
+    {
+      reason: 'invalid_n_number',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The input is not a structurally valid N-number (after the optional leading "N": 1–5 characters, a leading digit 1–9, then digits, optionally 1–2 trailing letters; I and O are unused).',
+      recovery:
+        'Supply a valid N-number such as "N172SP" or "N12345" (leading N optional), or use faa_search_registrations to find one by make/model, state, or Mode S code.',
+    },
+  ],
 
   async handler(input, ctx) {
     const service = getRegistryService();

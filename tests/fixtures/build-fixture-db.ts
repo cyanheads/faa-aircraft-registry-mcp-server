@@ -24,11 +24,14 @@ export function tempDbPath(): string {
  * Build the fixture database at `path`. Seeds:
  * - N12345 (12345): active Cessna 172S, Lycoming IO-360, individual owner.
  * - N5RP (5RP): active record with a co-owner and LLC registrant.
- * - N99SP (99SP): active but deliberately sparse (no year, no cruise speed, no owner name).
+ * - N99SP (99SP): active but deliberately sparse (year/owner/specs stored as NULL).
+ * - N105HH (105HH): active Hiller UH-12D with year_mfr = 0 — the FAA zero-sentinel blank.
  * - N404ER (404ER): deregistered only.
  * - N777RZ (777RZ): reserved only.
  * Plus ACFTREF 2072714 / 2072715 (both Cessna 172S — an intentional mfr+model tie),
- * 2072716 (Cessna 182T) and 1234567 (sparse), ENGINE 41514 (Lycoming).
+ * 2072716 (Cessna 182T), 1234567 (sparse/NULL), 1370737 (Boeing 737: cruise_speed = 0 and
+ * num_seats = 0 blanked, num_engines = 2 preserved), 1500021 (Schleicher glider: num_engines = 0
+ * preserved as a real value, cruise_speed = 0 blanked), ENGINE 41514 (Lycoming).
  */
 export async function buildFixtureDb(path: string): Promise<void> {
   const spec = registrationStoreSpec(path);
@@ -169,6 +172,47 @@ export async function buildFixtureDb(path: string): Promise<void> {
       null,
     );
 
+    // N105HH — Hiller UH-12D with year_mfr = 0, the FAA zero-sentinel for a blank
+    // year (mirrors the real N105HH). yearManufactured must come back undefined and
+    // the formatted headline must omit the year, not render "0 HILLER UH-12D".
+    reg.run(
+      '105HH',
+      null,
+      '5130003',
+      null,
+      'HILLER',
+      'UH-12D',
+      '6',
+      '1',
+      null,
+      null,
+      0,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      'V',
+      null,
+      '105ACE',
+      null,
+      null,
+      null,
+      null,
+      '1004',
+      null,
+      null,
+    );
+
     handle
       .prepare(
         `INSERT INTO aircraft_ref (
@@ -233,6 +277,44 @@ export async function buildFixtureDb(path: string): Promise<void> {
     refRow.run('2072715', 'CESSNA', '172S', '4', '1', '1', '0', 1, 4, 'CLASS 1', 126, '3A12', null);
     refRow.run('2072716', 'CESSNA', '182T', '4', '1', '1', '0', 1, 4, 'CLASS 1', 145, '3A13', null);
 
+    /**
+     * Zero-sentinel reference rows (issue #1). 1370737: a powered fixed-wing with
+     * cruise_speed = 0 and num_seats = 0 (both FAA blanks → undefined) but a real
+     * num_engines = 2 (preserved). 1500021: an unpowered glider whose num_engines = 0
+     * is a genuine value (must survive), alongside cruise_speed = 0 (a blank → undefined) —
+     * the pair proves the coercion is field-scoped, never blanket.
+     */
+    refRow.run(
+      '1370737',
+      'BOEING',
+      '737-200',
+      '5',
+      '5',
+      '1',
+      '0',
+      2,
+      0,
+      'CLASS 3',
+      0,
+      'A16WE',
+      'BOEING',
+    );
+    refRow.run(
+      '1500021',
+      'SCHLEICHER',
+      'ASK 21',
+      '1',
+      '0',
+      '1',
+      '0',
+      0,
+      2,
+      'CLASS 1',
+      0,
+      null,
+      null,
+    );
+
     const refFts = handle.prepare(
       `INSERT INTO aircraft_ref_fts (code, mfr, model) VALUES (?, ?, ?)`,
     );
@@ -240,6 +322,8 @@ export async function buildFixtureDb(path: string): Promise<void> {
     refFts.run('1234567', 'SPARSE AERO', 'MODEL X');
     refFts.run('2072715', 'CESSNA', '172S');
     refFts.run('2072716', 'CESSNA', '182T');
+    refFts.run('1370737', 'BOEING', '737-200');
+    refFts.run('1500021', 'SCHLEICHER', 'ASK 21');
 
     handle
       .prepare(
@@ -303,14 +387,14 @@ export async function buildFixtureDb(path: string): Promise<void> {
         null,
       );
 
-    // Mark the mirror complete so ready() is true.
+    // Mark the mirror complete so ready() is true (total = registration row count).
     handle
       .prepare(
         `INSERT INTO mirror_sync_state (id, status, completed_at, total, started_at)
          VALUES (1, 'complete', ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET status='complete', completed_at=excluded.completed_at, total=excluded.total`,
       )
-      .run(new Date().toISOString(), 3, new Date().toISOString());
+      .run(new Date().toISOString(), 4, new Date().toISOString());
   });
 
   handle.close();

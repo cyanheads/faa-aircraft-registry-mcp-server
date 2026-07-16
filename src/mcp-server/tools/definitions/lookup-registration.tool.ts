@@ -24,7 +24,7 @@ export const lookupRegistrationTool = tool('faa_lookup_registration', {
       .string()
       .min(1)
       .describe(
-        'US registration N-number to decode. Accepts "N12345" or "12345"; the leading N is optional.',
+        'US registration N-number to decode. Accepts "N12345" or "12345" (leading N optional). Shape: 1–5 characters — a leading digit 1–9, then digits, optionally ending in 1–2 letters (I and O are unused).',
       ),
   }),
 
@@ -37,6 +37,13 @@ export const lookupRegistrationTool = tool('faa_lookup_registration', {
       when: 'The N-number is well-formed but has no active registration in the MASTER file.',
       recovery:
         'Call faa_get_registration_status to check whether the number is deregistered or reserved, or faa_search_registrations to find the right N-number.',
+    },
+    {
+      reason: 'invalid_n_number',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The input is not a structurally valid N-number (after the optional leading "N": 1–5 characters, a leading digit 1–9, then digits, optionally 1–2 trailing letters; I and O are unused).',
+      recovery:
+        'Supply a valid N-number such as "N172SP" or "N12345" (leading N optional), or use faa_search_registrations to find one by make/model, state, or Mode S code.',
     },
   ],
 

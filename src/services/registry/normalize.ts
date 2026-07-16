@@ -22,6 +22,43 @@ export function displayNNumber(normalized: string): string {
 }
 
 /**
+ * The US registration N-number grammar, on the canonical form produced by
+ * {@link normalizeNNumber} (uppercase, no leading `N`, no whitespace): a leading
+ * digit 1–9, then more digits, optionally ending in one or two letters — `I` and
+ * `O` are never used and a real number never starts with `0`. Overall length is
+ * 1–5. Validated against every `n_number` in the active/deregistered/reserved
+ * corpus (zero rejections), so it rejects only genuinely malformed input.
+ */
+const N_NUMBER_SHAPE = /^[1-9]\d{0,4}$|^[1-9]\d{0,3}[A-HJ-NP-Z]$|^[1-9]\d{0,2}[A-HJ-NP-Z]{2}$/;
+
+/**
+ * Whether `normalized` is a structurally valid N-number. Pass the output of
+ * {@link normalizeNNumber}; a malformed identifier is rejected before a lookup
+ * turns it into a misleading `not_found`/`unknown` answer.
+ */
+export function isValidNNumber(normalized: string): boolean {
+  return N_NUMBER_SHAPE.test(normalized);
+}
+
+/**
+ * The manufacturer/model/series code grammar: 6–7 uppercase alphanumeric
+ * characters, no positional sub-structure. Validated against every
+ * `aircraft_ref.code` in the corpus (zero rejections). Length 6 is rare but real
+ * (an amateur-built reference row), so a strict length-7 rule would 404 a genuine
+ * aircraft; leading `0` and the letters `I`/`O` are all legitimate here, unlike
+ * N-numbers.
+ */
+const AIRCRAFT_CODE_SHAPE = /^[0-9A-Z]{6,7}$/;
+
+/**
+ * Whether `code` is a structurally valid aircraft reference code. Pass the
+ * trimmed, uppercased form (as `getAircraftType` builds it before querying).
+ */
+export function isValidAircraftCode(code: string): boolean {
+  return AIRCRAFT_CODE_SHAPE.test(code);
+}
+
+/**
  * Clean a raw FAA field: trim surrounding whitespace and return `undefined` for
  * empty values. Permissible fields are legitimately blank on many records, so an
  * empty field is absence (unknown), never a fabricated value.

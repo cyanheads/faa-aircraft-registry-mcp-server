@@ -22,7 +22,7 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
       .string()
       .min(1)
       .describe(
-        '7-character manufacturer/model/series code (e.g. "2072714"). Discover codes via faa_search_aircraft_types.',
+        'Manufacturer/model/series code (e.g. "2072714") — 6–7 uppercase alphanumeric characters, usually 7. Discover codes via faa_search_aircraft_types.',
       ),
   }),
 
@@ -67,8 +67,15 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The 7-char code is well-formed but absent from the aircraft reference table.',
+      when: 'The code is well-formed but absent from the aircraft reference table.',
       recovery: 'Use faa_search_aircraft_types to discover valid manufacturer/model codes by name.',
+    },
+    {
+      reason: 'invalid_code',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The input is not a structurally valid code (expected 6–7 uppercase alphanumeric characters).',
+      recovery:
+        'Use faa_search_aircraft_types to discover a valid manufacturer/model code by name, then pass its code here.',
     },
   ],
 

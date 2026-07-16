@@ -9,7 +9,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { invalidParams, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import {
   defineMirror,
   type Mirror,
@@ -29,7 +29,14 @@ import {
   decodeTypeReservation,
 } from './decode.js';
 import { createFaaIngester } from './ingest.js';
-import { cleanField, displayNNumber, normalizeNNumber, toFtsMatch } from './normalize.js';
+import {
+  cleanField,
+  displayNNumber,
+  isValidAircraftCode,
+  isValidNNumber,
+  normalizeNNumber,
+  toFtsMatch,
+} from './normalize.js';
 import {
   AIRCRAFT_REF_FTS,
   AIRCRAFT_REF_FTS_COLUMNS,
@@ -85,6 +92,18 @@ function num(row: Row, key: string): number | undefined {
   return typeof value === 'number' ? value : undefined;
 }
 
+/**
+ * Read a numeric FAA spec column where the FAA encodes a blank/unknown value as
+ * `0` — cruise speed, year manufactured, seats. Maps that `0` to `undefined` so a
+ * permissible blank renders as absent, never as a fabricated real value (e.g. a
+ * "0 mph" cruise or a "year 0" aircraft). NOT for `num_engines`, where `0` is a
+ * legitimate value on unpowered aircraft (gliders, balloons) — use {@link num}.
+ */
+function numZeroAsBlank(row: Row, key: string): number | undefined {
+  const value = num(row, key);
+  return value === 0 ? undefined : value;
+}
+
 export class RegistryService {
   private readonly mirror: Mirror;
   private readonly redactOwnerPii: boolean;
@@ -122,6 +141,27 @@ export class RegistryService {
     }
   }
 
+  /**
+   * Reject a malformed N-number before it becomes a misleading not-found/unknown
+   * answer. Shared by lookupRegistration + getRegistrationStatus (and, through
+   * lookupRegistration, the resource). Carries the contract `reason` on the wire
+   * and the tool's `recovery` hint when the caller declared the matching reason.
+   */
+  private failInvalidNNumber(input: string, ctx: Context): never {
+    throw invalidParams(
+      `"${input}" is not a valid US N-number. Expected 1–5 characters after an optional leading "N": a leading digit 1–9, then digits, optionally ending in one or two letters (I and O are not used). Example: N172SP.`,
+      { reason: 'invalid_n_number', ...ctx.recoveryFor('invalid_n_number') },
+    );
+  }
+
+  /** Reject a malformed manufacturer/model/series code before querying. */
+  private failInvalidCode(input: string, ctx: Context): never {
+    throw invalidParams(
+      `"${input}" is not a valid manufacturer/model/series code. Expected 6–7 uppercase alphanumeric characters (e.g. "2072714"). Discover codes with faa_search_aircraft_types.`,
+      { reason: 'invalid_code', ...ctx.recoveryFor('invalid_code') },
+    );
+  }
+
   /** Lookup one active registration by N-number, fully decoded and joined. */
   async lookupRegistration(
     nNumberInput: string,
@@ -129,6 +169,7 @@ export class RegistryService {
   ): Promise<RegistrationRecord | undefined> {
     await this.assertReady();
     const nNumber = normalizeNNumber(nNumberInput);
+    if (!isValidNNumber(nNumber)) this.failInvalidNNumber(nNumberInput, ctx);
     ctx.log.debug('Looking up registration', { nNumber });
     const rows = await this.mirror.getByIds([nNumber]);
     const row = rows[0];
@@ -140,6 +181,7 @@ export class RegistryService {
   async getAircraftType(codeInput: string, ctx: Context): Promise<AircraftTypeRecord | undefined> {
     await this.assertReady();
     const code = codeInput.trim().toUpperCase();
+    if (!isValidAircraftCode(code)) this.failInvalidCode(codeInput, ctx);
     ctx.log.debug('Looking up aircraft type', { code });
     const handle = await this.mirror.raw();
     const row = handle.prepare<Row>(`SELECT * FROM ${AIRCRAFT_REF_TABLE} WHERE code = ?`).get(code);
@@ -283,6 +325,7 @@ export class RegistryService {
   ): Promise<RegistrationStatusResult> {
     await this.assertReady();
     const nNumber = normalizeNNumber(nNumberInput);
+    if (!isValidNNumber(nNumber)) this.failInvalidNNumber(nNumberInput, ctx);
     const nNumberDisplay = displayNNumber(nNumber);
     ctx.log.debug('Resolving registration status', { nNumber });
 
@@ -361,7 +404,7 @@ export class RegistryService {
       engineType: coded(str(row, 'engine_type_code'), decodeTypeEngine),
       engineMake: str(row, 'engine_make'),
       engineModel: str(row, 'engine_model'),
-      yearManufactured: num(row, 'year_mfr'),
+      yearManufactured: numZeroAsBlank(row, 'year_mfr'),
       region: coded(str(row, 'region_code'), decodeRegion),
       lastActionDate: str(row, 'last_action_date'),
       certIssueDate: str(row, 'cert_issue_date'),
@@ -418,7 +461,7 @@ export class RegistryService {
       ownerRedacted: this.redactOwnerPii,
       make: str(row, 'make'),
       model: str(row, 'model'),
-      yearManufactured: num(row, 'year_mfr'),
+      yearManufactured: numZeroAsBlank(row, 'year_mfr'),
       state: str(row, 'state'),
       aircraftType: coded(str(row, 'aircraft_type_code'), decodeTypeAircraft),
       status: coded(str(row, 'status_code'), decodeStatusCode),
@@ -437,10 +480,11 @@ export class RegistryService {
       engineType: coded(str(row, 'engine_type_code'), decodeTypeEngine),
       category: coded(str(row, 'category_code'), decodeAircraftCategory),
       builderCertification: coded(str(row, 'builder_cert_code'), decodeBuilderCert),
+      // num_engines keeps a literal 0 — a real value for unpowered aircraft (gliders, balloons), not a blank sentinel.
       numberOfEngines: num(row, 'num_engines'),
-      numberOfSeats: num(row, 'num_seats'),
+      numberOfSeats: numZeroAsBlank(row, 'num_seats'),
       weightClass: str(row, 'weight_class'),
-      cruiseSpeedMph: num(row, 'cruise_speed'),
+      cruiseSpeedMph: numZeroAsBlank(row, 'cruise_speed'),
       typeCertificateDataSheet: str(row, 'tc_data_sheet'),
       typeCertificateDataHolder: str(row, 'tc_data_holder'),
     });
@@ -454,8 +498,9 @@ export class RegistryService {
       model: str(row, 'model'),
       aircraftType: coded(str(row, 'aircraft_type_code'), decodeTypeAircraft),
       category: coded(str(row, 'category_code'), decodeAircraftCategory),
+      // num_engines keeps a literal 0 — a real value for unpowered aircraft (gliders, balloons), not a blank sentinel.
       numberOfEngines: num(row, 'num_engines'),
-      numberOfSeats: num(row, 'num_seats'),
+      numberOfSeats: numZeroAsBlank(row, 'num_seats'),
     });
   }
 }
