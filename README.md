@@ -39,7 +39,7 @@ Composes with live flight-tracking data: the Mode S (hex) code this server retur
 
 ## Tools
 
-Five tools covering the registry — two exact-key lookups, two full-text searches, and one cross-file status resolver. Searches return decoded summaries with N-numbers (or 7-char reference codes) to drill into via the matching lookup.
+Five tools covering the registry — two exact-key lookups, two full-text searches, and one cross-file status resolver. Searches return decoded summaries with N-numbers (or 6–7-character reference codes) to drill into via the matching lookup.
 
 | Tool | Description |
 |:---|:---|
@@ -47,7 +47,7 @@ Five tools covering the registry — two exact-key lookups, two full-text search
 | `faa_get_registration_status` | Resolve an N-number across all three status files (active, deregistered, reserved) in priority order, returning a definitive `recordType`. |
 | `faa_search_registrations` | Search active registrations by owner name, make/model, state, aircraft type, or Mode S code. |
 | `faa_search_aircraft_types` | Search the aircraft reference table by manufacturer/model name, type, or category to discover manufacturer-model codes. |
-| `faa_get_aircraft_type` | Decode a 7-char manufacturer/model/series code to aircraft specs — category, type, engine, seats, weight class, cruise speed, type-certificate data. |
+| `faa_get_aircraft_type` | Decode a 6–7-character manufacturer/model/series code to aircraft specs — category, type, engine, seats, weight class, cruise speed, type-certificate data. |
 
 ### `faa_lookup_registration`
 
@@ -86,7 +86,7 @@ Full-text search over active registrations, returning decoded summaries with N-n
 
 ### `faa_search_aircraft_types`
 
-Discover the 7-char manufacturer/model/series codes by name before decoding them.
+Discover the 6–7-character manufacturer/model/series codes by name before decoding them.
 
 - Filter by `query` (manufacturer/model name, full-text), `aircraftType` code, or `category` code; at least one filter is required
 - Returns reference summaries with the code to pass to `faa_get_aircraft_type`
