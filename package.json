@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/faa-aircraft-registry-mcp-server",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "mcpName": "io.github.cyanheads/faa-aircraft-registry-mcp-server",
   "description": "Decode N-numbers to aircraft, engine, status, and owner; search the US civil aircraft registry by owner, type, or state; resolve active/deregistered/reserved status — offline via MCP. STDIO or Streamable HTTP.",
   "type": "module",

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-07-16
+
+Rejects malformed N-numbers and aircraft codes with an actionable validation error instead of a misleading not-found/unknown answer, and blanks the FAA's 0-sentinel numeric fields (cruise speed, year manufactured, seats) instead of rendering them as real values.
+
 ## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-07-16
 
 Bounds registry rebuild peak memory to the largest single file via lazy ZIP inflation, streamed line parsing, and chunked auxiliary transactions (measured ~2.35 GiB to ~0.74 GiB); syncs the Dockerfile OCI description label to package.json.
