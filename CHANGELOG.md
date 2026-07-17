@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-07-16
+
+An interrupted mirror rebuild that leaves the index empty now fails loud with ServiceUnavailable instead of serving empty results as healthy, and the mirror CLI scripts now emit their logging output instead of dropping it silently.
+
 ## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-07-16
 
 Rejects malformed N-numbers and aircraft codes with an actionable validation error instead of a misleading not-found/unknown answer, and blanks the FAA's 0-sentinel numeric fields (cruise speed, year manufactured, seats) instead of rendering them as real values.

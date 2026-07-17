@@ -1,6 +1,6 @@
 # faa-aircraft-registry-mcp-server - Directory Structure
 
-Generated on: 2026-07-16 09:59:18
+Generated on: 2026-07-17 05:57:54
 
 ```text
 faa-aircraft-registry-mcp-server/
@@ -167,6 +167,8 @@ faa-aircraft-registry-mcp-server/
 │   │   └── make-zip.ts
 │   ├── prompts/
 │   ├── resources/
+│   ├── scripts/
+│   │   └── mirror-context.test.ts
 │   ├── services/
 │   │   ├── csv.test.ts
 │   │   ├── ingest.test.ts
