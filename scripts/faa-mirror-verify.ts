@@ -8,18 +8,32 @@
  */
 
 import { logger } from '@cyanheads/mcp-ts-core/utils';
-import { getMirror } from './_mirror-context.js';
+import { getMirror, initCliLogging } from './_mirror-context.js';
 
+await initCliLogging();
 const mirror = getMirror();
 const status = await mirror.status();
+const recordCount = await mirror.store.count();
 
 logger.info(
-  `FAA registry mirror status: ready=${status.ready}, status=${status.status}, total=${status.total ?? 0}, completedAt=${status.completedAt ?? 'never'}`,
+  `FAA registry mirror status: ready=${status.ready}, status=${status.status}, records=${recordCount}, total=${status.total ?? 0}, completedAt=${status.completedAt ?? 'never'}`,
 );
 if (status.error) logger.warning(`Last sync error: ${status.error}`);
 
 if (!status.ready) {
   logger.error('Mirror is NOT ready — run mirror:init to build the index.');
+  await mirror.close();
+  process.exit(1);
+}
+
+// `ready()` reflects only the last sync's completion marker, so an interrupted
+// rebuild that emptied the primary table before reloading it still reports ready.
+// Treat a ready-but-empty index as a failure — the exact state the runtime
+// readiness guard rejects — so this health check gates a deploy on real data.
+if (recordCount === 0) {
+  logger.error(
+    'Mirror reports ready but the registration table is EMPTY — a rebuild was likely interrupted. Re-run mirror:init (or mirror:refresh) to rebuild the index.',
+  );
   await mirror.close();
   process.exit(1);
 }

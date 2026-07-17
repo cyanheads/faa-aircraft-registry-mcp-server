@@ -129,14 +129,30 @@ export class RegistryService {
   }
 
   /**
-   * Assert the mirror has completed at least one full init. A cold index is a
-   * hard failure — there is no live API fallback for this server.
+   * Assert the mirror has completed at least one full init AND currently holds
+   * records. A cold index is a hard failure — there is no live API fallback for
+   * this server.
+   *
+   * `mirror.ready()` reflects only the last sync's completion marker, which
+   * survives an interrupted rebuild: the ingester wipes the primary table before
+   * reloading it, so a crash/OOM mid-rebuild leaves an empty `registration` table
+   * while a prior run's `completedAt` still reports ready. Without the row-count
+   * gate every lookup/search/status query returns empty with `isSuccess: true`
+   * instead of the loud `ServiceUnavailable` this server promises. The durable
+   * fix — an atomic stage-and-swap in the framework MirrorService so a rebuild is
+   * never observably empty — is tracked in cyanheads/mcp-ts-core#286.
    */
   private async assertReady(): Promise<void> {
     if (!(await this.mirror.ready())) {
       throw serviceUnavailable(
         'The FAA registry index has not been built yet. Run the mirror:init script to download and index the registry before querying.',
         { reason: 'mirror_not_ready' },
+      );
+    }
+    if ((await this.mirror.store.count()) === 0) {
+      throw serviceUnavailable(
+        'The FAA registry index is present but empty — a rebuild was likely interrupted before it finished loading. Re-run the mirror:init (or mirror:refresh) script to rebuild the index.',
+        { reason: 'mirror_empty' },
       );
     }
   }

@@ -9,8 +9,9 @@
  */
 
 import { logger } from '@cyanheads/mcp-ts-core/utils';
-import { getMirror } from './_mirror-context.js';
+import { getMirror, initCliLogging } from './_mirror-context.js';
 
+await initCliLogging();
 const mirror = getMirror();
 logger.info('Starting FAA registry mirror refresh');
 

@@ -536,3 +536,59 @@ describe('RegistryService — malformed identifier rejection (issue #5)', () => 
     expect(await service.getAircraftType('123456', ctx)).toBeUndefined();
   });
 });
+
+/**
+ * An interrupted rebuild wipes the primary `registration` table before reloading
+ * it, so a crash/OOM mid-rebuild leaves it empty while the prior sync's completion
+ * marker keeps `mirror.ready()` true. Every query must then fail loud with
+ * ServiceUnavailable rather than serve empty results as if healthy — including the
+ * aircraft-type tools, so a mid-rebuild mirror never answers partially. The
+ * durable atomic-rebuild fix belongs in the framework (cyanheads/mcp-ts-core#286);
+ * this guards the server side. Precondition is reproduced by dropping every
+ * registration row while leaving sync_state untouched.
+ */
+describe('RegistryService — empty-but-ready mirror (issue #7)', () => {
+  let service: RegistryService;
+  beforeEach(async () => {
+    service = await makeService(true);
+    const handle = await service.mirrorInstance.raw();
+    handle.exec('DELETE FROM registration');
+  });
+  afterEach(async () => {
+    await service.mirrorInstance.close();
+  });
+
+  it('still reports ready() true over an empty table — the state the guard must catch', async () => {
+    expect(await service.mirrorInstance.ready()).toBe(true);
+    expect(await service.mirrorInstance.store.count()).toBe(0);
+  });
+
+  it('fails lookupRegistration with ServiceUnavailable, not an empty result', async () => {
+    await expect(service.lookupRegistration('N12345', ctx)).rejects.toBeInstanceOf(McpError);
+    await expect(service.lookupRegistration('N12345', ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'mirror_empty' },
+    });
+  });
+
+  it('fails searchRegistrations loud instead of returning an empty page', async () => {
+    await expect(
+      service.searchRegistrations({ makeModel: 'cessna', limit: 25, offset: 0 }, ctx),
+    ).rejects.toMatchObject({ data: { reason: 'mirror_empty' } });
+  });
+
+  it('fails getRegistrationStatus loud instead of a silent unknown', async () => {
+    await expect(service.getRegistrationStatus('N12345', ctx)).rejects.toMatchObject({
+      data: { reason: 'mirror_empty' },
+    });
+  });
+
+  it('fails the aircraft-type tools too — no partial success on a mid-rebuild mirror', async () => {
+    await expect(service.getAircraftType('2072714', ctx)).rejects.toMatchObject({
+      data: { reason: 'mirror_empty' },
+    });
+    await expect(
+      service.searchAircraftTypes({ query: 'cessna', limit: 25, offset: 0 }, ctx),
+    ).rejects.toMatchObject({ data: { reason: 'mirror_empty' } });
+  });
+});
