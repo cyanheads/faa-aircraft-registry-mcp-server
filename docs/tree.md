@@ -1,10 +1,9 @@
 # faa-aircraft-registry-mcp-server - Directory Structure
 
-Generated on: 2026-07-17 05:57:54
+Generated on: 2026-08-25 02:50:17
 
 ```text
 faa-aircraft-registry-mcp-server/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -15,9 +14,10 @@ faa-aircraft-registry-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
-├── .mirror/
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -165,6 +165,8 @@ faa-aircraft-registry-mcp-server/
 │   ├── fixtures/
 │   │   ├── build-fixture-db.ts
 │   │   └── make-zip.ts
+│   ├── integration/
+│   │   └── tool-contracts.int.test.ts
 │   ├── prompts/
 │   ├── resources/
 │   ├── scripts/

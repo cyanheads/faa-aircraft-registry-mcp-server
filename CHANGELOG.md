@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-08-24
+
+MCP 2026-07-28 support, strict tool inputs, valid error envelopes, and explicit stateless serving.
+
 ## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-07-16
 
 An interrupted mirror rebuild that leaves the index empty now fails loud with ServiceUnavailable instead of serving empty results as healthy, and the mirror CLI scripts now emit their logging output instead of dropping it silently.

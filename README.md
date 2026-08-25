@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.7-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/faa-aircraft-registry-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Ffaa-aircraft-registry-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/faa-aircraft-registry-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.8-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/faa-aircraft-registry-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Ffaa-aircraft-registry-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/faa-aircraft-registry-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -110,6 +110,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp
 - Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
 - Structured logging with optional OpenTelemetry tracing
 - STDIO and Streamable HTTP transports
+- MCP protocol revision 2026-07-28 alongside initialize-negotiated 2025-era clients
 
 FAA-registry-specific:
 
@@ -231,7 +232,7 @@ FAA_MIRROR_PATH=/path/to/faa-registry.db bun run mirror:refresh
 ```
 
 - **Keep the path stable.** Point `FAA_MIRROR_PATH` (and the same env var in your MCP client config) at a persistent location so the built index is reused across runs. Default: `.mirror/faa-registry.db`.
-- **Daily refresh.** Under HTTP transport the server schedules a daily `mirror:refresh` aligned to the FAA's nightly re-release (~11:30 PM Central); the index stays queryable throughout. Under stdio, run `mirror:refresh` out-of-band (e.g. a cron job).
+- **Daily refresh.** Under HTTP transport the server schedules a daily `mirror:refresh` aligned to the FAA's nightly re-release (~11:30 PM Central). If an interrupted rebuild leaves the index empty, queries fail loudly with `ServiceUnavailable` until the rebuild succeeds. Under stdio, run `mirror:refresh` out-of-band (e.g. a cron job).
 - **Docker.** The image ships the mirror CLI and a writable `.mirror` data directory owned by the runtime user. Mount a volume there and run `mirror:init` once (e.g. `docker exec <container> bun run mirror:init`, or a one-shot init job against the shared volume) so the index persists across container restarts.
 - **Until the index exists,** every query fails with a `ServiceUnavailable` error whose recovery hint points to `mirror:init` — there is no live API to fall back to, so the cold state surfaces loudly rather than returning empty results.
 
@@ -239,7 +240,7 @@ The source URL is overridable via `FAA_DATABASE_URL` (for a private or cached mi
 
 ### Prerequisites
 
-- [Bun v1.3](https://bun.sh/) or higher (or Node.js v24+). `bun:sqlite` is built into Bun; a Node-only deployment adds `better-sqlite3` (already declared as an optional peer dependency).
+- [Bun v1.4](https://bun.sh/) or higher (or Node.js v24+). `bun:sqlite` is built into Bun; a Node-only deployment adds `better-sqlite3` (already declared as an optional peer dependency).
 - Disk space for the built index (a few hundred MB) at `FAA_MIRROR_PATH`.
 - Network access at `mirror:init` / `mirror:refresh` time to download the FAA ZIP. Not needed at query time.
 
@@ -279,6 +280,7 @@ bun run mirror:init
 | `FAA_MIRROR_PATH` | Filesystem path to the SQLite index file. Point at a persistent path; mount a volume here in production. | `.mirror/faa-registry.db` |
 | `FAA_DATABASE_URL` | Source URL for the FAA Releasable Aircraft Database ZIP, used by `mirror:init` / `mirror:refresh` only. Overridable for a private/cached mirror; never read at request time. | FAA registry ZIP |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
+| `MCP_SESSION_MODE` | Session mode: `auto` (resolves to stateful), `stateful`, or `stateless`. The included `.env.example` and Docker image explicitly use stateless mode because this server has no multi-round-trip input. | `auto` → `stateful` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
 | `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path where the MCP server is mounted. | `/mcp` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
