@@ -33,14 +33,14 @@ in the service layer, common to every tool.
 | Tool | reason | code | when | recovery |
 |:-----|:-------|:-----|:-----|:---------|
 | `faa_lookup_registration` | `not_found` | `NotFound` | N-number normalized and valid but no active MASTER record | Call `faa_get_registration_status` to check if it is deregistered or reserved, or `faa_search_registrations` to find the right N-number. |
-| `faa_lookup_registration` | `invalid_n_number` | `InvalidParams` | N-number malformed — fails the shape check after normalization | Provide a valid US N-number (1–5 chars after an optional "N": leading digit 1–9, then digits, optionally one or two trailing letters; I and O unused). Example: N172SP. |
+| `faa_lookup_registration` | `invalid_n_number` | `ValidationError` | N-number fails domain validation after normalization | Provide a valid US N-number (1–5 chars after an optional "N": leading digit 1–9, then digits, optionally one or two trailing letters; I and O unused). Example: N172SP. |
 | `faa_lookup_registration` | `owner_redacted` | *(not an error — `ownerRedacted: true` flag on success)* | — | — |
-| `faa_search_registrations` | `owner_search_disabled` | `InvalidParams` | `ownerName` supplied while `FAA_REDACT_OWNER_PII` is on | Drop the ownerName filter — owner-name search is disabled on this deployment. Search by makeModel, state, aircraftType, or modeSCode instead. |
-| `faa_search_registrations` | `no_filters` | `InvalidParams` | No search filter supplied | Provide at least one of makeModel, state, aircraftType, or modeSCode (ownerName when PII is unredacted). |
-| `faa_search_aircraft_types` | `no_filters` | `InvalidParams` | No search filter supplied | Provide a query, aircraftType, or category to search the reference table. |
+| `faa_search_registrations` | `owner_search_disabled` | `ValidationError` | `ownerName` supplied while `FAA_REDACT_OWNER_PII` is on | Drop the ownerName filter — owner-name search is disabled on this deployment. Search by makeModel, state, aircraftType, or modeSCode instead. |
+| `faa_search_registrations` | `no_filters` | `ValidationError` | No search filter supplied | Provide at least one of makeModel, state, aircraftType, or modeSCode (ownerName when PII is unredacted). |
+| `faa_search_aircraft_types` | `no_filters` | `ValidationError` | No search filter supplied | Provide a query, aircraftType, or category to search the reference table. |
 | `faa_get_aircraft_type` | `not_found` | `NotFound` | 6–7-char code well-formed but absent from ACFTREF | Use `faa_search_aircraft_types` to discover valid manufacturer-model codes by name. |
-| `faa_get_aircraft_type` | `invalid_code` | `InvalidParams` | Code malformed — not 6–7 uppercase alphanumeric characters | Use `faa_search_aircraft_types` to discover valid manufacturer-model codes by name. |
-| `faa_get_registration_status` | `invalid_n_number` | `InvalidParams` | N-number malformed — fails the shape check after normalization | Provide a valid US N-number (see `faa_lookup_registration` above). |
+| `faa_get_aircraft_type` | `invalid_code` | `ValidationError` | Code fails domain validation — not 6–7 uppercase alphanumeric characters | Use `faa_search_aircraft_types` to discover valid manufacturer-model codes by name. |
+| `faa_get_registration_status` | `invalid_n_number` | `ValidationError` | N-number fails domain validation after normalization | Provide a valid US N-number (see `faa_lookup_registration` above). |
 | `faa_get_registration_status` | *(otherwise none — `recordType: 'unknown'` is a valid success)* | — | — | — |
 
 The cold-mirror case (a never-initialized index) is a service-layer `ServiceUnavailable` with
@@ -162,7 +162,7 @@ runtime), so the primary path needs no native dependency; a Node-only deployment
 `better-sqlite3` as an optional peer. The mirror is unavailable on Cloudflare Workers (no
 SQLite / no persistent FS) — this server targets stdio + Node/Bun HTTP, not Workers.
 
-### Ingest strategy — built at image-build, refreshed daily
+### Ingest strategy — initialized out-of-band, refreshed daily
 
 The dataset is one ~1M-row corpus that changes daily but is queried far more than it changes —
 the canonical "mirror a bulk upstream" case. Two competing framings from the brief
@@ -177,18 +177,18 @@ the canonical "mirror a bulk upstream" case. Two competing framings from the bri
   idempotent and resumable.
 - **Refresh on a daily schedule.** Register `mirror:refresh` on a cron via `schedulerService`
   inside `setup()` (gated to HTTP transport so stdio operators run it out-of-band), aligned to
-  the FAA's 11:30 PM Central re-release. A refresh rebuilds from the latest ZIP; the index
-  stays transactionally queryable throughout.
-- **Read path gated on `mirror.ready()`.** `ready` is true once a full init has ever completed
-  — the mirror keeps serving during/after a refresh. There is no live API to fall back to, so
-  a cold (never-initialized) index is a hard `ServiceUnavailable` with a recovery hint to run
-  `mirror:init`, not a silent empty result.
+  the FAA's 11:30 PM Central re-release. A refresh rebuilds from the latest ZIP; an
+  interrupted rebuild that leaves the index empty surfaces `ServiceUnavailable` rather than a
+  deceptive empty result.
+- **Read path gated on readiness and row count.** A cold (never-initialized) index, or an
+  interrupted rebuild with no records, is a hard `ServiceUnavailable` with a recovery hint to
+  run `mirror:init` or `mirror:refresh`. There is no live API fallback and no silent empty
+  result.
 
-The scaffold already anticipates this: the `Dockerfile` pre-creates the writable `.mirror`
-data dir owned by the runtime user and carries the commented-out mirror-CLI stanza from the
-`api-mirror` skill. Implementation un-comments that stanza and adds the three lifecycle
-scripts (`mirror:init`, `mirror:refresh`, `mirror:verify`) plus the `_mirror-context.ts` shim
-to `package.json` `files[]`.
+The `Dockerfile` pre-creates the writable `.mirror` data directory owned by the runtime user
+and copies the three lifecycle scripts (`mirror:init`, `mirror:refresh`, `mirror:verify`) plus
+the `_mirror-context.ts` shim into the image. The same scripts are included in `package.json`
+`files[]` for npm consumers.
 
 ### Index schema (mirror store)
 
@@ -245,8 +245,8 @@ Goes in `src/config/server-config.ts` as its own Zod schema, lazy-parsed via `pa
 
 1. **Config + server setup** — `server-config.ts` (the three env vars above); `createApp()`
    with `name`/`title` both set to `faa-aircraft-registry-mcp-server` (machine name on every
-   surface — never a Title Case display name), `websiteUrl` to the repo, and a short
-   `instructions` string noting the offline/keyless nature and the redaction default.
+   surface — never a Title Case display name) and a short `instructions` string noting the
+   offline/keyless nature and the redaction default.
 2. **`registry-service`** — `defineMirror` + `sqliteMirrorStore` schema; the `sync` ingester
    (download ZIP → parse five `.txt` files → pre-join → yield rows); decode maps; the
    N-number normalizer; the redaction gate (single chokepoint that strips PII fields and
@@ -308,12 +308,11 @@ each branch validated separately so `format()`-parity holds per branch).
   service. `bun:sqlite` is built in (no native dep on the Bun/Docker path); Node deployments
   add `better-sqlite3` as an optional peer. Not Workers-portable (no SQLite there) — acceptable
   because this server targets stdio + Node/Bun HTTP.
-- **Ingest = built at image-build / out-of-band, refreshed daily — never on startup.** A full
-  parse+join of ~1M rows must not block server start. The `mirror:init` CLI writes the index
-  during Docker build so the image ships warm; `mirror:refresh` runs on a daily cron
+- **Ingest = initialized out-of-band, refreshed daily — never on startup.** A full parse+join
+  of ~1M rows must not block server start. The operator runs `mirror:init` once against a
+  persistent local or Docker-mounted `.mirror` directory; `mirror:refresh` runs on a daily cron
   (`schedulerService` in `setup()`, HTTP-gated) aligned to the FAA's 11:30 PM Central
-  re-release. The scaffold's `Dockerfile` already pre-creates the `.mirror` dir and carries the
-  mirror-CLI stanza, confirming this is the framework's intended path for the server class.
+  re-release. The Docker image ships the mirror CLI and pre-creates the writable `.mirror` dir.
 - **Decode/reference-table handling = pre-join codes, decode labels at query time, surface
   both.** `MASTER` stores `mfr_mdl_code` / `eng_mfr_mdl_code` (joined to `ACFTREF`/`ENGINE` at
   ingest for make/model/engine names) and a dozen single-char coded fields (status, type,
