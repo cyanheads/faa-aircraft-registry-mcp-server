@@ -14,7 +14,7 @@ import { codedValueSchema, renderCoded } from './_schemas.js';
 export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
   title: 'faa-aircraft-registry-mcp-server: get aircraft type',
   description:
-    'Decode a 7-character FAA manufacturer/model/series code to aircraft specifications from the reference table — manufacturer, model, aircraft category, aircraft type, engine type, number of engines, number of seats, weight class, cruise speed, and type-certificate data sheet/holder. Use faa_search_aircraft_types first to discover a code by manufacturer or model name.',
+    'Decode a 7-character FAA manufacturer/model/series code to aircraft specifications — manufacturer, model, aircraft category, aircraft type, engine type, number of engines, number of seats, weight class, cruise speed, and type-certificate data sheet/holder. Use faa_search_aircraft_types first to discover a code by manufacturer or model name.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -67,12 +67,12 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The code is well-formed but absent from the aircraft reference table.',
+      when: 'The code is well-formed but does not identify a known aircraft type.',
       recovery: 'Use faa_search_aircraft_types to discover valid manufacturer/model codes by name.',
     },
     {
       reason: 'invalid_code',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The input is not a structurally valid code (expected 6–7 uppercase alphanumeric characters).',
       recovery:
         'Use faa_search_aircraft_types to discover a valid manufacturer/model code by name, then pass its code here.',

@@ -4,7 +4,8 @@
  * service (the on-disk FAA SQLite mirror) in setup(), registers the read-only
  * tools and the registration resource, and — under HTTP transport — schedules a
  * daily mirror refresh aligned to the FAA's nightly re-release. The index is
- * never built on startup; mirror:init runs out-of-band (Docker build / one-shot).
+ * never built on startup; mirror:init runs out-of-band (locally or in a one-shot
+ * container against the persistent mirror volume).
  * @module index
  */
 
@@ -28,7 +29,6 @@ const REFRESH_CRON = '0 6 * * *';
 await createApp({
   name: 'faa-aircraft-registry-mcp-server',
   title: 'faa-aircraft-registry-mcp-server',
-  websiteUrl: 'https://github.com/cyanheads/faa-aircraft-registry-mcp-server',
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
   instructions:

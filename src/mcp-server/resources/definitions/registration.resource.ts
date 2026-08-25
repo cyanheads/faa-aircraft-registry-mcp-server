@@ -15,8 +15,9 @@ export const registrationResource = resource('faa://registration/{nNumber}', {
   name: 'faa-registration',
   title: 'faa-aircraft-registry-mcp-server: registration record',
   description:
-    'Fetch the full registration record for one US civil aircraft N-number — the same decoded, pre-joined payload as faa_lookup_registration. Owner PII is redacted unless the deployment opts in.',
+    'Fetch the full decoded registration record for one US civil aircraft N-number — the same payload as faa_lookup_registration. Owner PII is redacted unless the deployment opts in.',
   mimeType: 'application/json',
+  cacheHint: { ttlMs: 3_600_000, cacheScope: 'private' },
   params: z.object({
     nNumber: z
       .string()
@@ -31,13 +32,13 @@ export const registrationResource = resource('faa://registration/{nNumber}', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The N-number is well-formed but has no active registration in the MASTER file.',
+      when: 'The N-number is well-formed but has no active registration.',
       recovery:
         'Use the faa_get_registration_status tool to check for deregistered/reserved status, or faa_search_registrations to find the right N-number.',
     },
     {
       reason: 'invalid_n_number',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The N-number is not structurally valid (after the optional leading "N": 1–5 characters, a leading digit 1–9, then digits, optionally 1–2 trailing letters; I and O are unused).',
       recovery:
         'Request a valid N-number such as "N172SP" or "N12345" (leading N optional), or use faa_search_registrations to find one by make/model, state, or Mode S code.',

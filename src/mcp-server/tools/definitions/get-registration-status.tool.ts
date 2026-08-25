@@ -21,7 +21,7 @@ import { codedValueSchema, renderCoded } from './_schemas.js';
 export const getRegistrationStatusTool = tool('faa_get_registration_status', {
   title: 'faa-aircraft-registry-mcp-server: get registration status',
   description:
-    'Resolve registration and airworthiness status for a US civil aircraft N-number across all three status files — active (MASTER), deregistered (DEREG), and reserved (RESERVED) — in priority order, returning a definitive recordType. Use this (rather than faa_lookup_registration) when a number may be inactive: it returns "deregistered" or "reserved" for a known-but-inactive number instead of a not-found. A number that was never issued returns recordType "unknown" — a valid, informative answer, not an error. Accepts "N12345" or "12345".',
+    'Resolve whether a US civil aircraft N-number is active, deregistered, reserved, or unknown, including the available registration and airworthiness status. Use this rather than faa_lookup_registration when a number may be inactive. A number that was never issued returns recordType "unknown" — a valid, informative answer, not an error. Accepts "N12345" or "12345".',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -36,9 +36,7 @@ export const getRegistrationStatusTool = tool('faa_get_registration_status', {
   output: z.object({
     recordType: z
       .enum(['active', 'deregistered', 'reserved', 'unknown'])
-      .describe(
-        'Which file the number resolved in: active (MASTER), deregistered (DEREG), reserved (RESERVED), or unknown (none).',
-      ),
+      .describe('Resolved registration state: active, deregistered, reserved, or unknown.'),
     nNumber: z.string().describe('Normalized N-number without the leading "N".'),
     nNumberDisplay: z.string().describe('N-number with the leading "N" for display.'),
     status: codedValueSchema
@@ -101,7 +99,7 @@ export const getRegistrationStatusTool = tool('faa_get_registration_status', {
   errors: [
     {
       reason: 'invalid_n_number',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The input is not a structurally valid N-number (after the optional leading "N": 1–5 characters, a leading digit 1–9, then digits, optionally 1–2 trailing letters; I and O are unused).',
       recovery:
         'Supply a valid N-number such as "N172SP" or "N12345" (leading N optional), or use faa_search_registrations to find one by make/model, state, or Mode S code.',

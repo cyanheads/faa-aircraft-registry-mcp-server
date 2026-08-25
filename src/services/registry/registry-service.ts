@@ -9,7 +9,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { invalidParams, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
 import {
   defineMirror,
   type Mirror,
@@ -164,7 +164,7 @@ export class RegistryService {
    * and the tool's `recovery` hint when the caller declared the matching reason.
    */
   private failInvalidNNumber(input: string, ctx: Context): never {
-    throw invalidParams(
+    throw validationError(
       `"${input}" is not a valid US N-number. Expected 1–5 characters after an optional leading "N": a leading digit 1–9, then digits, optionally ending in one or two letters (I and O are not used). Example: N172SP.`,
       { reason: 'invalid_n_number', ...ctx.recoveryFor('invalid_n_number') },
     );
@@ -172,7 +172,7 @@ export class RegistryService {
 
   /** Reject a malformed manufacturer/model/series code before querying. */
   private failInvalidCode(input: string, ctx: Context): never {
-    throw invalidParams(
+    throw validationError(
       `"${input}" is not a valid manufacturer/model/series code. Expected 6–7 uppercase alphanumeric characters (e.g. "2072714"). Discover codes with faa_search_aircraft_types.`,
       { reason: 'invalid_code', ...ctx.recoveryFor('invalid_code') },
     );

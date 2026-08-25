@@ -34,7 +34,7 @@ const aircraftTypeSummarySchema = z
 export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
   title: 'faa-aircraft-registry-mcp-server: search aircraft types',
   description:
-    'Search the FAA aircraft reference table by manufacturer/model name (full-text), aircraft type code, or category code to discover 7-character manufacturer/model/series codes and browse specifications. Use this before faa_get_aircraft_type to find a code by name. At least one filter is required. Every response reports totalCount (all matches, not just this page); when more remain, it returns nextOffset — pass it back as offset to page forward.',
+    'Search FAA aircraft types by manufacturer/model name, aircraft type code, or category code to discover 7-character manufacturer/model/series codes and browse specifications. Use this before faa_get_aircraft_type to find a code by name. At least one filter is required. Every response reports totalCount (all matches, not just this page); when more remain, it returns nextOffset — pass it back as offset to page forward.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -101,7 +101,7 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
   errors: [
     {
       reason: 'no_filters',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'No search filter was supplied.',
       recovery:
         'Provide a query (manufacturer/model name), an aircraftType code, or a category code to search.',

@@ -38,7 +38,7 @@ const registrationSummarySchema = z
 export const searchRegistrationsTool = tool('faa_search_registrations', {
   title: 'faa-aircraft-registry-mcp-server: search registrations',
   description:
-    'Search active US civil aircraft registrations by owner name, make/model, state, aircraft type, or Mode S (hex) code. Full-text search over the local registry index; returns decoded summaries with N-numbers to drill into via faa_lookup_registration. At least one filter is required. Owner-name search is unavailable when this deployment redacts owner PII — search by make/model, state, aircraft type, or Mode S code instead. Every response reports totalCount (all matches, not just this page); when more remain, it returns nextOffset — pass it back as offset to page forward.',
+    'Search active US civil aircraft registrations by owner name, make/model, state, aircraft type, or Mode S (hex) code. Returns decoded summaries with N-numbers to drill into via faa_lookup_registration. At least one filter is required. Owner-name search is unavailable when this deployment redacts owner PII — search by make/model, state, aircraft type, or Mode S code instead. Every response reports totalCount (all matches, not just this page); when more remain, it returns nextOffset — pass it back as offset to page forward.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -110,14 +110,14 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
   errors: [
     {
       reason: 'owner_search_disabled',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'ownerName was supplied while owner-PII redaction is enabled on this deployment.',
       recovery:
         'Drop the ownerName filter — owner-name search is disabled here. Search by makeModel, state, aircraftType, or modeSCode instead.',
     },
     {
       reason: 'no_filters',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'No search filter was supplied.',
       recovery:
         'Provide at least one of makeModel, state, aircraftType, or modeSCode (or ownerName when owner PII is unredacted).',

@@ -6,8 +6,9 @@
  *
  * @module vitest.config
  */
-import { defineConfig, mergeConfig } from 'vitest/config';
+
 import coreConfig from '@cyanheads/mcp-ts-core/vitest.config';
+import { defineConfig, mergeConfig } from 'vitest/config';
 
 const alias = { '@/': new URL('./src/', import.meta.url).pathname };
 
@@ -43,15 +44,15 @@ export default mergeConfig(
         //     testTimeout: 15_000,
         //   },
         // },
-        // {
-        //   extends: true,
-        //   test: {
-        //     name: 'integration',
-        //     include: ['tests/integration/**/*.test.ts'],
-        //     maxWorkers: 1,
-        //     testTimeout: 30_000,
-        //   },
-        // },
+        {
+          extends: true,
+          test: {
+            name: 'integration',
+            include: ['tests/integration/**/*.test.ts'],
+            maxWorkers: 1,
+            testTimeout: 30_000,
+          },
+        },
       ],
     },
   }),

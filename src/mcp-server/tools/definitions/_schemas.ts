@@ -51,35 +51,21 @@ export const registrationRecordSchema = z.object({
     .string()
     .describe('N-number in conventional display form, with the leading "N".'),
   serialNumber: z.string().optional().describe('Manufacturer serial number.'),
-  manufacturerModelCode: z
-    .string()
-    .optional()
-    .describe(
-      '7-char manufacturer/model/series code (join key into the aircraft reference table).',
-    ),
+  manufacturerModelCode: z.string().optional().describe('7-char manufacturer/model/series code.'),
   engineManufacturerModelCode: z
     .string()
     .optional()
-    .describe('5-char engine manufacturer/model code (join key into the engine reference table).'),
-  make: z
-    .string()
-    .optional()
-    .describe('Aircraft manufacturer name, resolved from the reference table.'),
-  model: z.string().optional().describe('Aircraft model name, resolved from the reference table.'),
+    .describe('5-char engine manufacturer/model code.'),
+  make: z.string().optional().describe('Aircraft manufacturer name.'),
+  model: z.string().optional().describe('Aircraft model name.'),
   aircraftType: codedValueSchema
     .optional()
     .describe('Aircraft type (e.g. Fixed-wing single-engine) as code + label.'),
   engineType: codedValueSchema
     .optional()
     .describe('Engine type (e.g. Reciprocating, Turbo-fan) as code + label.'),
-  engineMake: z
-    .string()
-    .optional()
-    .describe('Engine manufacturer name, resolved from the reference table.'),
-  engineModel: z
-    .string()
-    .optional()
-    .describe('Engine model name, resolved from the reference table.'),
+  engineMake: z.string().optional().describe('Engine manufacturer name.'),
+  engineModel: z.string().optional().describe('Engine model name.'),
   yearManufactured: z
     .number()
     .optional()

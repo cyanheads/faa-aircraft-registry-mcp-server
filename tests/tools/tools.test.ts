@@ -61,7 +61,7 @@ describe('faa_lookup_registration', () => {
     });
   });
 
-  it('throws invalid_n_number (InvalidParams) with a recovery hint for a malformed N-number', async () => {
+  it('throws invalid_n_number (ValidationError) with a recovery hint for a malformed N-number', async () => {
     await expect(
       lookupRegistrationTool.handler({ nNumber: 'BANANA' }, lookupCtx),
     ).rejects.toMatchObject({
@@ -72,7 +72,8 @@ describe('faa_lookup_registration', () => {
   it('omits a year_mfr = 0 from the record and the formatted headline', async () => {
     const out = await lookupRegistrationTool.handler({ nNumber: 'N105HH' }, lookupCtx);
     expect(out.yearManufactured).toBeUndefined();
-    const text = lookupRegistrationTool.format?.(out)[0]?.text ?? '';
+    const content = lookupRegistrationTool.format?.(out)[0];
+    const text = content?.type === 'text' ? content.text : '';
     // Headline must read "HILLER UH-12D", never "0 HILLER UH-12D".
     expect(text).toContain('HILLER UH-12D');
     expect(text).not.toContain('0 HILLER');
@@ -126,7 +127,6 @@ describe('faa_search_registrations — enrichment / effective-output parity', ()
   const freshCtx = () =>
     createMockContext({
       errors: searchRegistrationsTool.errors,
-      enrichment: searchRegistrationsTool.enrichment,
     });
 
   it('produces effective output that parses when the result set is NOT truncated', async () => {
@@ -220,7 +220,9 @@ describe('faa_search_registrations — enrichment / effective-output parity', ()
     expect(() => effectiveSchema.parse(effective)).not.toThrow();
     expect(effective).toMatchObject({ totalCount: 2 });
     // The empty-result notice must not claim nothing matched when 2 rows do.
-    expect(effective.notice).toContain('past the end');
+    expect(getEnrichment(enrichCtx)).toMatchObject({
+      notice: expect.stringContaining('past the end'),
+    });
   });
 });
 
@@ -239,7 +241,6 @@ describe('faa_search_aircraft_types — enrichment / effective-output parity', (
   const freshCtx = () =>
     createMockContext({
       errors: searchAircraftTypesTool.errors,
-      enrichment: searchAircraftTypesTool.enrichment,
     });
 
   it('produces effective output that parses when the result set is NOT truncated', async () => {
@@ -315,7 +316,8 @@ describe('faa_get_aircraft_type', () => {
     expect(out.numberOfEngines).toBe(2);
     expect(out.cruiseSpeedMph).toBeUndefined();
     expect(out.numberOfSeats).toBeUndefined();
-    const text = getAircraftTypeTool.format?.(out)[0]?.text ?? '';
+    const content = getAircraftTypeTool.format?.(out)[0];
+    const text = content?.type === 'text' ? content.text : '';
     expect(text).toContain('**Engines:** 2');
     expect(text).not.toContain('Cruise speed');
     expect(text).not.toContain('Seats:');

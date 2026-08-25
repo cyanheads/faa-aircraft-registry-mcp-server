@@ -504,10 +504,10 @@ describe('RegistryService — malformed identifier rejection (issue #5)', () => 
     await service.mirrorInstance.close();
   });
 
-  it('rejects a malformed N-number from lookupRegistration with InvalidParams', async () => {
+  it('rejects a malformed N-number from lookupRegistration with ValidationError', async () => {
     await expect(service.lookupRegistration('BANANA', ctx)).rejects.toBeInstanceOf(McpError);
     await expect(service.lookupRegistration('BANANA', ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_n_number' },
     });
   });
@@ -526,7 +526,7 @@ describe('RegistryService — malformed identifier rejection (issue #5)', () => 
 
   it('rejects a malformed aircraft code from getAircraftType', async () => {
     await expect(service.getAircraftType('ABC', ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_code' },
     });
   });
