@@ -280,7 +280,7 @@ bun run mirror:init
 | `FAA_MIRROR_PATH` | Filesystem path to the SQLite index file. Point at a persistent path; mount a volume here in production. | `.mirror/faa-registry.db` |
 | `FAA_DATABASE_URL` | Source URL for the FAA Releasable Aircraft Database ZIP, used by `mirror:init` / `mirror:refresh` only. Overridable for a private/cached mirror; never read at request time. | FAA registry ZIP |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
-| `MCP_SESSION_MODE` | Session mode: `auto` (resolves to stateful), `stateful`, or `stateless`. The included `.env.example` and Docker image explicitly use stateless mode because this server has no multi-round-trip input. | `auto` → `stateful` |
+| `MCP_SESSION_MODE` | Session mode: `auto` (resolves to stateful), `stateful`, or `stateless`. The included `.env.example` and Docker image explicitly use stateless mode because this server has no multi-round-trip input. | `stateless` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
 | `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path where the MCP server is mounted. | `/mcp` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
