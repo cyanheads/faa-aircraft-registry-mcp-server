@@ -101,14 +101,13 @@ export function registrationStoreSpec(path: string): SqliteMirrorStoreSpec {
  * Idempotent DDL for the auxiliary reference/status tables and the aircraft_ref
  * FTS index (`CREATE … IF NOT EXISTS` throughout) — safe to run on every open.
  *
- * These tables are NOT part of the MirrorService primary-table DDL, and the
- * framework's migration *runner* deliberately skips migrations on a brand-new
- * database (a fresh DB is stamped straight to the target version, since
- * migrations exist to transform pre-existing data). A version-gated migration
- * therefore never creates these tables on first init. The ingester instead runs
- * this DDL unconditionally at the start of every sync, before it touches the
- * tables — guaranteeing they exist on a cold mirror and matching how the
- * framework builds the primary table (idempotent, on every open).
+ * These tables are NOT part of the MirrorService primary-table DDL. Two paths
+ * create them, and both must stay idempotent: {@link auxiliaryTablesMigration},
+ * which the framework runner applies on a freshly created database as well as
+ * on upgrade, and the ingester, which runs this DDL unconditionally at the start
+ * of every sync before it touches the tables. The second is what guarantees the
+ * tables on a mirror whose schema version was already stamped, and it matches
+ * how the framework builds the primary table (idempotent, on every open).
  */
 export function ensureAuxiliaryTables(handle: SqliteHandle): void {
   handle.exec(`
@@ -189,10 +188,11 @@ export function ensureAuxiliaryTables(handle: SqliteHandle): void {
 
 /**
  * Migration wrapper around {@link ensureAuxiliaryTables} for the MirrorService
- * `migrations` spec. The runner skips this on a fresh DB (see
- * {@link ensureAuxiliaryTables}), so it's effectively a no-op there and the
- * ingester's unconditional call is what actually creates the tables — but
- * declaring it keeps the auxiliary schema versioned alongside the primary table.
+ * `migrations` spec. The runner applies `up()` on a freshly created database as
+ * well as on upgrade, so this is what stands the auxiliary tables up at first
+ * open, and it keeps their schema versioned alongside the primary table. `up()`
+ * must therefore tolerate the current declarative layout — pure
+ * `CREATE … IF NOT EXISTS`, never a bare `ALTER` assuming an older shape.
  */
 function auxiliaryTablesMigration(): Migration {
   return {
