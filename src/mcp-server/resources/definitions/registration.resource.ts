@@ -38,6 +38,8 @@ export const registrationResource = resource('faa://registration/{nNumber}', {
     },
     {
       reason: 'invalid_n_number',
+      // Raised in registry-service's shared N-number gate, not in this handler.
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The N-number is not structurally valid (after the optional leading "N": 1–5 characters, a leading digit 1–9, then digits, optionally 1–2 trailing letters; I and O are unused).',
       recovery:

@@ -72,6 +72,8 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
     },
     {
       reason: 'invalid_code',
+      // Raised in registry-service's shared code gate, not in this handler.
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The input is not a structurally valid code (expected 6–7 uppercase alphanumeric characters).',
       recovery:
