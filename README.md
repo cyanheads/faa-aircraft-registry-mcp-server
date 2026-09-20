@@ -29,17 +29,9 @@
 
 ## Overview
 
-The entire US civil aircraft registry as an offline lookup server. Resolve a tail number to its aircraft, make/model, engine, year, and registered owner; search by owner, type, or state; decode manufacturer and engine codes to specs; and resolve registration status across active, deregistered, and reserved records.
+The US civil aircraft registry, mirrored offline from the FAA's Releasable Aircraft Database — there is no live FAA registry API. Decode an N-number to its aircraft, engine, and registered owner; resolve active, deregistered, or reserved status; search by owner, make/model, state, or Mode S code; and decode manufacturer/model codes to full aircraft specs. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
-The data is the FAA's [Releasable Aircraft Database](https://registry.faa.gov/database/ReleasableAircraft.zip) — the full registry published by the FAA Civil Aviation Registry as a public-domain bulk download (a US Government work, no copyright). There is no keyless live FAA registry API, so the server builds a local index from that download instead: `MASTER` → `ACFTREF` → `ENGINE` are pre-joined into an embedded SQLite + FTS5 index, and every coded field is decoded at query time. Queries hit that local index — keyless, no runtime network, no per-request rate limit.
-
-The index is **not bundled** with the package. On first use the operator runs `mirror:init` to download and build it (see [First-run setup](#first-run-setup)). Owner name and address are **redacted by default** (see [Owner-PII redaction](#owner-pii-redaction)).
-
-Composes with live flight-tracking data: the Mode S (hex) code this server returns is the ICAO 24-bit address that OpenSky and similar feeds key on, so a tail number or transponder code seen in the air decodes here to its aircraft and status.
-
-## Tools
-
-Five tools covering the registry — two exact-key lookups, two full-text searches, and one cross-file status resolver. Searches return decoded summaries with N-numbers (or 6–7-character reference codes) to drill into via the matching lookup.
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -49,83 +41,88 @@ Five tools covering the registry — two exact-key lookups, two full-text search
 | `faa_search_aircraft_types` | Search the aircraft reference table by manufacturer/model name, type, or category to discover manufacturer-model codes. |
 | `faa_get_aircraft_type` | Decode a 6–7-character manufacturer/model/series code to aircraft specs — category, type, engine, seats, weight class, cruise speed, type-certificate data. |
 
-### `faa_lookup_registration`
+### Resources
 
-The primary tool. Decode one N-number to its full record in a single call.
+| Resource | Description |
+|:---|:---|
+| `faa://registration/{nNumber}` | Full registration record for one N-number — the same decoded, pre-joined payload as `faa_lookup_registration`. |
 
-- Accepts `N12345` or `12345` — the leading `N` is optional, and the number is normalized before lookup
-- Resolves the `MASTER` → `ACFTREF` → `ENGINE` join and decodes every coded field (aircraft type, engine type, status, airworthiness class, region) — each surfaced as both the raw FAA code and the decoded label
-- Returns the Mode S code in both octal and hex; the hex form is the ICAO 24-bit address used by live flight-tracking feeds
-- Owner name/address are included only when `FAA_REDACT_OWNER_PII=false`; otherwise `ownerRedacted: true` flags that they were withheld
-- A known-but-inactive number (deregistered or reserved) is *not found* here — use `faa_get_registration_status` for the cross-file answer
+Also reachable via `faa_lookup_registration`; search collections aren't exposed as resources.
 
----
+## Capability reference
 
-### `faa_get_registration_status`
+### `faa_lookup_registration` <sub>tool</sub>
 
-Resolve where an N-number stands across the registry, even when it is no longer active.
-
-- Checks the active (`MASTER`), deregistered (`DEREG`), and reserved (`RESERVED`) files in priority order, returning a discriminated `recordType`: `active`, `deregistered`, `reserved`, or `unknown`
-- A number that was never issued resolves to `recordType: "unknown"` — a valid, informative answer rather than an error
-- Each branch carries the fields relevant to that state (active: status + airworthiness + dates; deregistered: cancel date + serial; reserved: reservation type + reserve/purge dates)
-- Owner-PII–free — returns status facts only
+- Accepts `N12345` or `12345` — leading `N` optional, normalized before lookup
+- Resolves `MASTER` → `ACFTREF` → `ENGINE` and decodes every coded field (aircraft type, engine type, status, airworthiness class, region) as both raw code and label
+- Returns the Mode S code in octal and hex; hex is the ICAO 24-bit address used by flight-tracking feeds
+- Owner name/address included only when `FAA_REDACT_OWNER_PII=false`; otherwise `ownerRedacted: true` flags that they were withheld
+- Typed errors: `not_found` (well-formed but no active registration — use `faa_get_registration_status`), `invalid_n_number` (malformed input)
 
 ---
 
-### `faa_search_registrations`
+### `faa_get_registration_status` <sub>tool</sub>
 
-Full-text search over active registrations, returning decoded summaries with N-numbers for follow-up.
+- Checks active (`MASTER`), deregistered (`DEREG`), and reserved (`RESERVED`) files in priority order
+- Discriminated `recordType`: `active`, `deregistered`, `reserved`, or `unknown` — a never-issued number resolves to `unknown`, not an error
+- Branch-specific fields populate per state (active: status + airworthiness + dates; deregistered: cancel date + serial + mfr/model code; reserved: reservation type + reserve/expiration/purge dates)
+- Owner-PII-free — status facts only
+- Typed error: `invalid_n_number` for malformed input
 
-- Filter by `ownerName`, `makeModel`, `state`, `aircraftType`, or `modeSCode`; at least one filter is required
-- **Owner-name search is disabled when `FAA_REDACT_OWNER_PII` is on** — search by make/model, state, type, or Mode S code instead
-- Free-text terms are column-scoped: `makeModel` matches make/model only, never owner name or city
+---
+
+### `faa_search_registrations` <sub>tool</sub>
+
+- Filters: `ownerName`, `makeModel`, `state`, `aircraftType`, `modeSCode` — at least one required
+- Owner-name search disabled when `FAA_REDACT_OWNER_PII` is on; typed `owner_search_disabled` error names the alternative filters
+- `limit` 1–200 (default 25) and `offset` pagination; every response reports `totalCount`, and a truncated page carries `nextOffset`
 - Each result carries an N-number to pass to `faa_lookup_registration` for full detail
-- Every response reports `totalCount` across all matches, so a partial result set is never mistaken for complete; page through it with `limit` (1–200, default 25) and `offset` — a truncated response names the `nextOffset` to request
+- Typed error: `no_filters` when no filter is supplied
 
 ---
 
-### `faa_search_aircraft_types`
+### `faa_search_aircraft_types` <sub>tool</sub>
 
-Discover the 6–7-character manufacturer/model/series codes by name before decoding them.
-
-- Filter by `query` (manufacturer/model name, full-text), `aircraftType` code, or `category` code; at least one filter is required
+- Filters: `query` (manufacturer/model name, full-text), `aircraftType` code, `category` code — at least one required
 - Returns reference summaries with the code to pass to `faa_get_aircraft_type`
-- Every response reports `totalCount` across all matches; page through it with `limit` (1–200, default 25) and `offset` — a truncated response names the `nextOffset` to request
+- `limit` 1–200 (default 25) and `offset` pagination; every response reports `totalCount`, and a truncated page carries `nextOffset`
+- Typed error: `no_filters` when no filter is supplied
 
-## Resources
+---
 
-| Type | Name | Description |
-|:---|:---|:---|
-| Resource | `faa://registration/{nNumber}` | Full registration record for one N-number — the same decoded, pre-joined payload as `faa_lookup_registration`. |
+### `faa_get_aircraft_type` <sub>tool</sub>
 
-All registry data is also reachable via tools — the resource is a convenience for clients that inject resources as context. Tool-only clients (the majority) reach the same record through `faa_lookup_registration`, so no data is locked behind the resource. Search collections are not exposed as resources; use the search tools instead.
+- Accepts a 6–7-character uppercase alphanumeric manufacturer/model/series code
+- Returns manufacturer, model, aircraft type, engine type, category, builder certification, seats, engines, weight class, cruise speed, and type-certificate data
+- Discover codes by name first via `faa_search_aircraft_types`
+- Typed errors: `not_found` (well-formed code, no reference record), `invalid_code` (malformed input)
+
+---
+
+### `faa://registration/{nNumber}` <sub>resource</sub>
+
+- Same payload as `faa_lookup_registration` — `application/json`, cached 1 hour, private scope
+- `nNumber` accepts `N12345` or `12345` (leading `N` optional)
+- Typed errors: `not_found`, `invalid_n_number` — same conditions as the tool
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
-- Declarative tool and resource definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats, with typed per-tool error contracts and recovery hints
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
-- MCP protocol revision 2026-07-28 alongside initialize-negotiated 2025-era clients
-
-FAA-registry-specific:
+FAA registry-specific:
 
 - Offline and keyless at runtime — every query hits the local SQLite + FTS5 index; no API key, no runtime network, no rate limit
 - Built on the framework `MirrorService`: `mirror:init` builds the index out-of-band, and the HTTP server schedules a daily refresh aligned to the FAA's nightly re-release
-- Pre-joined `MASTER` → `ACFTREF` → `ENGINE` records, so one call returns "2008 Cessna 172S, Lycoming IO-360, valid registration" rather than raw join codes
-- Fail-safe owner-PII redaction — redaction defaults on and drops owner name/address from output *and* disables owner-name search
+- Pre-joined `MASTER` → `ACFTREF` → `ENGINE` records — one call returns decoded aircraft, engine, and status instead of raw join codes
+- Fail-safe owner-PII redaction — defaults on, drops owner name/address from output, and disables owner-name search while active
+- Composes with live flight-tracking feeds — the Mode S hex code returned here is the ICAO 24-bit address that OpenSky and similar feeds key on
 
 Agent-friendly output:
 
 - Coded fields surface both the raw FAA code and the decoded label — the label for reasoning, the code so nothing is lost
 - Truncation disclosure — search tools flag `truncated` with `shown`/`cap` when the result set is capped, so a partial page is never read as the whole
 - Permissible-field honesty — fields the FAA leaves blank (year, cruise speed, co-owner names) stay absent rather than fabricated
-- `ownerRedacted` flag on every affected payload, so the agent knows owner data was withheld and why
-- Discriminated status output (`recordType`) so callers branch on data, not string parsing
+- Discriminated output — `recordType` and `ownerRedacted` flags let callers branch on data, not string parsing
 
 ## Getting started
 
@@ -280,7 +277,7 @@ bun run mirror:init
 | `FAA_MIRROR_PATH` | Filesystem path to the SQLite index file. Point at a persistent path; mount a volume here in production. | `.mirror/faa-registry.db` |
 | `FAA_DATABASE_URL` | Source URL for the FAA Releasable Aircraft Database ZIP, used by `mirror:init` / `mirror:refresh` only. Overridable for a private/cached mirror; never read at request time. | FAA registry ZIP |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
-| `MCP_SESSION_MODE` | Session mode: `auto` (resolves to stateful), `stateful`, or `stateless`. The included `.env.example` and Docker image explicitly use stateless mode because this server has no multi-round-trip input. | `stateless` |
+| `MCP_SESSION_MODE` | Session mode: `auto` (resolves to stateful), `stateful`, or `stateless`. The server declares `stateless` in source because it has no multi-round-trip input; setting this overrides that declaration. | `stateless` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
 | `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path where the MCP server is mounted. | `/mcp` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
@@ -361,7 +358,7 @@ See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and archit
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
