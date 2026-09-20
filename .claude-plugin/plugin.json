@@ -1,13 +1,17 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "faa-aircraft-registry-mcp-server",
   "version": "0.1.8",
   "description": "Decode N-numbers to aircraft, engine, status, and owner, and search the US civil aircraft registry by owner, type, or state — offline, keyless.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
   },
   "homepage": "https://github.com/cyanheads/faa-aircraft-registry-mcp-server#readme",
   "repository": "https://github.com/cyanheads/faa-aircraft-registry-mcp-server",
   "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
   "mcpServers": {
     "faa-aircraft-registry-mcp-server": {
       "command": "npx",
