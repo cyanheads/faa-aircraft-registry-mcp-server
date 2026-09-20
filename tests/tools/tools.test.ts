@@ -80,6 +80,38 @@ describe('faa_lookup_registration', () => {
   });
 });
 
+/**
+ * The resolved redaction flag has to reach BOTH client surfaces — a client
+ * reading `content[]` (Claude Desktop) must be told the owner block is withheld
+ * rather than silently see a record with no owner. `server-config.test.ts`
+ * covers how the flag itself resolves; this covers what the caller then sees.
+ */
+describe('owner-PII redaction — format() surface', () => {
+  afterAll(() => resetRegistryService());
+
+  const renderedRecord = async (): Promise<string> => {
+    const out = await lookupRegistrationTool.handler({ nNumber: 'N12345' }, lookupCtx);
+    const block = lookupRegistrationTool.format?.(out)[0];
+    return block?.type === 'text' ? block.text : '';
+  };
+
+  it('states that the owner block is withheld and prints no PII when redaction is ON', async () => {
+    await initService(true);
+    const text = await renderedRecord();
+    expect(text).toContain('ownerRedacted=true');
+    expect(text).toContain('withheld');
+    expect(text).not.toContain('JOHN Q PUBLIC');
+    expect(text).not.toContain('123 RUNWAY RD');
+  });
+
+  it('prints the registrant block when redaction is OFF', async () => {
+    await initService(false);
+    const text = await renderedRecord();
+    expect(text).toContain('ownerRedacted=false');
+    expect(text).toContain('JOHN Q PUBLIC');
+  });
+});
+
 describe('faa_search_registrations — redaction-gated owner search', () => {
   it('throws owner_search_disabled when redaction is ON and ownerName is supplied', async () => {
     await initService(true);
