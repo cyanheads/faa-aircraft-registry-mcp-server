@@ -120,8 +120,11 @@ describe('error envelope on the wire', () => {
   it('rejects an out-of-schema argument as InvalidParams with a recovery hint', async () => {
     const result = await runToolContract(
       lookupRegistrationTool,
-      // Wrong type for a declared field — rejected at argument validation.
-      { nNumber: 42 } as unknown as { nNumber: string },
+      /**
+       * Wrong type for a declared field — rejected at argument validation. A
+       * boolean, because pre-validation repairs an integer sent for a string.
+       */
+      { nNumber: true } as unknown as { nNumber: string },
     );
 
     expect(result.isError).toBe(true);
