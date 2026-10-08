@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "faa-aircraft-registry-mcp-server",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Decode N-numbers to aircraft, engine, status, and owner, and search the US civil aircraft registry by owner, type, or state — offline, keyless.",
   "author": {
     "name": "cyanheads",
