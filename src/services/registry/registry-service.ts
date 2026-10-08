@@ -160,21 +160,21 @@ export class RegistryService {
   /**
    * Reject a malformed N-number before it becomes a misleading not-found/unknown
    * answer. Shared by lookupRegistration + getRegistrationStatus (and, through
-   * lookupRegistration, the resource). Carries the contract `reason` on the wire
-   * and the tool's `recovery` hint when the caller declared the matching reason.
+   * lookupRegistration, the resource). Carries the contract `reason` on the wire;
+   * the framework fills the declaring tool's or resource's `recovery` hint.
    */
-  private failInvalidNNumber(input: string, ctx: Context): never {
+  private failInvalidNNumber(input: string): never {
     throw validationError(
       `"${input}" is not a valid US N-number. Expected 1–5 characters after an optional leading "N": a leading digit 1–9, then digits, optionally ending in one or two letters (I and O are not used). Example: N172SP.`,
-      { reason: 'invalid_n_number', ...ctx.recoveryFor('invalid_n_number') },
+      { reason: 'invalid_n_number' },
     );
   }
 
   /** Reject a malformed manufacturer/model/series code before querying. */
-  private failInvalidCode(input: string, ctx: Context): never {
+  private failInvalidCode(input: string): never {
     throw validationError(
       `"${input}" is not a valid manufacturer/model/series code. Expected 6–7 uppercase alphanumeric characters (e.g. "2072714"). Discover codes with faa_search_aircraft_types.`,
-      { reason: 'invalid_code', ...ctx.recoveryFor('invalid_code') },
+      { reason: 'invalid_code' },
     );
   }
 
@@ -185,7 +185,7 @@ export class RegistryService {
   ): Promise<RegistrationRecord | undefined> {
     await this.assertReady();
     const nNumber = normalizeNNumber(nNumberInput);
-    if (!isValidNNumber(nNumber)) this.failInvalidNNumber(nNumberInput, ctx);
+    if (!isValidNNumber(nNumber)) this.failInvalidNNumber(nNumberInput);
     ctx.log.debug('Looking up registration', { nNumber });
     const rows = await this.mirror.getByIds([nNumber]);
     const row = rows[0];
@@ -197,7 +197,7 @@ export class RegistryService {
   async getAircraftType(codeInput: string, ctx: Context): Promise<AircraftTypeRecord | undefined> {
     await this.assertReady();
     const code = codeInput.trim().toUpperCase();
-    if (!isValidAircraftCode(code)) this.failInvalidCode(codeInput, ctx);
+    if (!isValidAircraftCode(code)) this.failInvalidCode(codeInput);
     ctx.log.debug('Looking up aircraft type', { code });
     const handle = await this.mirror.raw();
     const row = handle.prepare<Row>(`SELECT * FROM ${AIRCRAFT_REF_TABLE} WHERE code = ?`).get(code);
@@ -341,7 +341,7 @@ export class RegistryService {
   ): Promise<RegistrationStatusResult> {
     await this.assertReady();
     const nNumber = normalizeNNumber(nNumberInput);
-    if (!isValidNNumber(nNumber)) this.failInvalidNNumber(nNumberInput, ctx);
+    if (!isValidNNumber(nNumber)) this.failInvalidNNumber(nNumberInput);
     const nNumberDisplay = displayNNumber(nNumber);
     ctx.log.debug('Resolving registration status', { nNumber });
 

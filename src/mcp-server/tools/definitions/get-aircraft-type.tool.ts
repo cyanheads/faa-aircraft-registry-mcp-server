@@ -85,9 +85,7 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
     const service = getRegistryService();
     const record = await service.getAircraftType(input.code, ctx);
     if (!record) {
-      throw ctx.fail('not_found', `No aircraft reference record for code "${input.code}".`, {
-        ...ctx.recoveryFor('not_found'),
-      });
+      throw ctx.fail('not_found', `No aircraft reference record for code "${input.code}".`);
     }
     return record;
   },

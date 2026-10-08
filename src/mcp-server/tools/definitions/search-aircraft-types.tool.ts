@@ -115,9 +115,7 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
     const category = input.category?.trim() || undefined;
 
     if (!query && !aircraftType && !category) {
-      throw ctx.fail('no_filters', 'At least one search filter is required.', {
-        ...ctx.recoveryFor('no_filters'),
-      });
+      throw ctx.fail('no_filters', 'At least one search filter is required.');
     }
 
     const page = await service.searchAircraftTypes(

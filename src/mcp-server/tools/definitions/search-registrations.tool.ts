@@ -129,9 +129,7 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
 
     const ownerName = input.ownerName?.trim() || undefined;
     if (ownerName && !service.ownerSearchEnabled) {
-      throw ctx.fail('owner_search_disabled', 'Owner-name search is disabled on this deployment.', {
-        ...ctx.recoveryFor('owner_search_disabled'),
-      });
+      throw ctx.fail('owner_search_disabled', 'Owner-name search is disabled on this deployment.');
     }
 
     const makeModel = input.makeModel?.trim() || undefined;
@@ -140,9 +138,7 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
     const modeSCode = input.modeSCode?.trim() || undefined;
 
     if (!ownerName && !makeModel && !state && !aircraftType && !modeSCode) {
-      throw ctx.fail('no_filters', 'At least one search filter is required.', {
-        ...ctx.recoveryFor('no_filters'),
-      });
+      throw ctx.fail('no_filters', 'At least one search filter is required.');
     }
 
     const page = await service.searchRegistrations(

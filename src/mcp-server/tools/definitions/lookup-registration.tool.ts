@@ -53,9 +53,7 @@ export const lookupRegistrationTool = tool('faa_lookup_registration', {
     const service = getRegistryService();
     const record = await service.lookupRegistration(input.nNumber, ctx);
     if (!record) {
-      throw ctx.fail('not_found', `No active registration for N-number "${input.nNumber}".`, {
-        ...ctx.recoveryFor('not_found'),
-      });
+      throw ctx.fail('not_found', `No active registration for N-number "${input.nNumber}".`);
     }
     return record;
   },

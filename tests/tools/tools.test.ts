@@ -7,7 +7,7 @@
  */
 
 import { McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { registrationResource } from '@/mcp-server/resources/definitions/registration.resource.js';
 import { getAircraftTypeTool } from '@/mcp-server/tools/definitions/get-aircraft-type.tool.js';
@@ -61,11 +61,19 @@ describe('faa_lookup_registration', () => {
     });
   });
 
-  it('throws invalid_n_number (ValidationError) with a recovery hint for a malformed N-number', async () => {
+  it('throws invalid_n_number (ValidationError) for a malformed N-number', async () => {
     await expect(
       lookupRegistrationTool.handler({ nNumber: 'BANANA' }, lookupCtx),
-    ).rejects.toMatchObject({
-      data: { reason: 'invalid_n_number', recovery: { hint: expect.stringContaining('N172SP') } },
+    ).rejects.toMatchObject({ data: { reason: 'invalid_n_number' } });
+  });
+
+  it('carries the declared recovery hint for a malformed N-number on the wire', async () => {
+    const result = await runToolContract(lookupRegistrationTool, { nNumber: 'BANANA' });
+    expect(result.isError).toBe(true);
+    const error = (result.structuredContent as { error: Record<string, unknown> }).error;
+    expect(error.data).toMatchObject({
+      reason: 'invalid_n_number',
+      recovery: { hint: expect.stringContaining('N172SP') },
     });
   });
 

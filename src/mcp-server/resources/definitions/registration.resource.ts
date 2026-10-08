@@ -50,9 +50,7 @@ export const registrationResource = resource('faa://registration/{nNumber}', {
   async handler(params, ctx) {
     const record = await getRegistryService().lookupRegistration(params.nNumber, ctx);
     if (!record) {
-      throw ctx.fail('not_found', `No active registration for N-number "${params.nNumber}".`, {
-        ...ctx.recoveryFor('not_found'),
-      });
+      throw ctx.fail('not_found', `No active registration for N-number "${params.nNumber}".`);
     }
     return record;
   },
