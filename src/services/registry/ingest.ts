@@ -44,6 +44,29 @@ const MASTER_PART_COUNT = 9;
 /** Rows per yielded mirror page — bounds the per-transaction batch. */
 const PAGE_SIZE = 5000;
 
+/** Reject incomplete snapshot layouts from directory metadata before any database writes. */
+function validateArchiveManifest(archive: ZipArchive): void {
+  const names = new Set(
+    archive.entryNames.map((name) => name.slice(name.lastIndexOf('/') + 1).toUpperCase()),
+  );
+  const splitParts = [...names].filter((name) => /^MASTER-\d+\.TXT$/.test(name));
+  const expectedParts = Array.from({ length: MASTER_PART_COUNT }, (_, i) => `MASTER-${i + 1}.TXT`);
+  const required = [
+    'ACFTREF.TXT',
+    'ENGINE.TXT',
+    'DEREG.TXT',
+    'RESERVED.TXT',
+    ...(splitParts.length > 0 ? expectedParts : ['MASTER.TXT']),
+  ];
+  const missing = required.filter((name) => !names.has(name));
+  const unexpected = splitParts.filter((name) => !expectedParts.includes(name));
+  if (missing.length > 0 || unexpected.length > 0) {
+    throw new Error(
+      `Incomplete FAA archive manifest. Missing: ${missing.join(', ') || 'none'}. Unexpected numbered MASTER files: ${unexpected.join(', ') || 'none'}. The existing registry tables were not changed.`,
+    );
+  }
+}
+
 /** A minimal engine reference, kept in memory for the MASTER join. */
 interface EngineRef {
   engineTypeCode: string | undefined;
@@ -427,6 +450,7 @@ export function createFaaIngester(
   return async function* sync({ mode, signal }: SyncContext): AsyncGenerator<SyncPage> {
     const buffer = await downloadZip(sourceUrl, signal);
     const archive = openZipArchive(buffer);
+    validateArchiveManifest(archive);
     logger.info(`FAA archive opened: ${archive.entryNames.length} entries (mode: ${mode})`);
 
     const handle = await getHandle();

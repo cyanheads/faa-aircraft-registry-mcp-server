@@ -13,11 +13,11 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { defineMirror, type Mirror, sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createFaaIngester } from '@/services/registry/ingest.js';
 import { registrationStoreSpec } from '@/services/registry/schema.js';
-import { tempDbPath } from '../fixtures/build-fixture-db.js';
-import { makeZip } from '../fixtures/make-zip.js';
+import { buildFixtureDb, tempDbPath } from '../fixtures/build-fixture-db.js';
+import { makeZip, type ZipInput } from '../fixtures/make-zip.js';
 
 /** Rows beyond one page — forces the MASTER paging / DEREG batching to loop. */
 const OVER_ONE_PAGE = 5003;
@@ -130,5 +130,120 @@ describe('createFaaIngester — end-to-end rebuild', () => {
       .get('90001');
     expect(row?.owner_name).toBe('FORMER OWNER');
     expect(row?.cancel_date).toBe('2020-06-15'); // FAA YYYYMMDD → ISO
+  });
+});
+
+/** Run the real ingest generator against a private seeded store and synthetic ZIP. */
+async function manifestProbe(
+  entries: ZipInput[],
+  expectedError?: string,
+  corruptFirst = false,
+): Promise<void> {
+  const path = tempDbPath();
+  await buildFixtureDb(path);
+  const store = sqliteMirrorStore(registrationStoreSpec(path));
+  const handle = await store.raw();
+  const zip = makeZip(entries);
+  if (corruptFirst) zip.writeUInt32LE(0, 0);
+  const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(zip));
+  try {
+    const sync = createFaaIngester(() => store.raw(), 'https://example.invalid/fixture.zip');
+    const generator = sync({ mode: 'init', signal: AbortSignal.timeout(5000) });
+    if (expectedError) {
+      await expect(generator.next()).rejects.toThrow(new RegExp(expectedError, 'i'));
+      for (const [table, total] of [
+        ['registration', 4],
+        ['aircraft_ref', 6],
+        ['engine_ref', 1],
+        ['dereg', 1],
+        ['reserved', 1],
+      ] as const) {
+        expect(handle.prepare<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n).toBe(
+          total,
+        );
+      }
+      expect(
+        handle.prepare('SELECT * FROM registration WHERE n_number = ?').get('12345'),
+      ).toBeDefined();
+    } else {
+      const rows = [];
+      for await (const page of generator) rows.push(...page.records);
+      expect(rows.map((r) => r.n_number)).toEqual(['10000']);
+    }
+  } finally {
+    fetch.mockRestore();
+    await store.close();
+  }
+}
+
+const auxiliaryEntries: ZipInput[] = [
+  { name: 'ENGINE.txt', data: Buffer.from(engineTxt) },
+  { name: 'ACFTREF.txt', data: Buffer.from(acftrefTxt) },
+  { name: 'DEREG.txt', data: Buffer.from(deregTxt()) },
+  { name: 'RESERVED.txt', data: Buffer.from(reservedTxt) },
+];
+const oneMaster = Buffer.from('N-NUMBER,MFR MDL CODE\n10000,2072714\n');
+
+describe('archive manifest', () => {
+  it.each(['ENGINE.txt', 'ACFTREF.txt', 'DEREG.txt', 'RESERVED.txt'])(
+    'rejects missing %s without wiping any table',
+    async (missing) => {
+      await manifestProbe(
+        [
+          ...auxiliaryEntries.filter((entry) => entry.name !== missing),
+          { name: 'MASTER.txt', data: oneMaster },
+        ],
+        missing,
+      );
+    },
+  );
+
+  it('rejects a partial split even when a legacy MASTER is present', async () => {
+    await manifestProbe(
+      [
+        ...auxiliaryEntries,
+        { name: 'MASTER-1.txt', data: oneMaster },
+        { name: 'MASTER.txt', data: oneMaster },
+      ],
+      'MASTER-2.txt',
+    );
+  });
+
+  it.each(['MASTER-0.txt', 'MASTER-10.txt', 'MASTER-01.txt'])(
+    'rejects unexpected %s without falling back to legacy',
+    async (name) => {
+      await manifestProbe(
+        [...auxiliaryEntries, { name: 'MASTER.txt', data: oneMaster }, { name, data: oneMaster }],
+        name.toUpperCase(),
+      );
+    },
+  );
+
+  it('rejects an archive with no MASTER without wiping', async () => {
+    await manifestProbe(auxiliaryEntries, 'MASTER.txt');
+  });
+
+  it('rejects a sole MASTER part before inflating its corrupt body', async () => {
+    const entry = { name: 'MASTER-1.txt', data: oneMaster };
+    await manifestProbe([entry], 'ACFTREF.txt', true);
+  });
+
+  it('accepts all nine split parts and ignores legacy when parts are present', async () => {
+    await manifestProbe([
+      ...auxiliaryEntries,
+      ...Array.from({ length: 9 }, (_, i) => ({
+        name: `folder/MASTER-${i + 1}.TXT`,
+        data: i === 0 ? oneMaster : Buffer.from('N-NUMBER\n'),
+      })),
+      { name: 'MASTER.txt', data: Buffer.from('N-NUMBER\n90000\n') },
+    ]);
+  });
+  it('accepts complete legacy archives using case-insensitive nested basenames', async () => {
+    await manifestProbe(
+      [...auxiliaryEntries, { name: 'MASTER.txt', data: oneMaster }].map((entry) => ({
+        ...entry,
+        name: `folder/nested/${entry.name.toLowerCase()}`,
+      })),
+    );
   });
 });
