@@ -51,7 +51,10 @@ export const registrationRecordSchema = z.object({
     .string()
     .describe('N-number in conventional display form, with the leading "N".'),
   serialNumber: z.string().optional().describe('Manufacturer serial number.'),
-  manufacturerModelCode: z.string().optional().describe('7-char manufacturer/model/series code.'),
+  manufacturerModelCode: z
+    .string()
+    .optional()
+    .describe('6–7-character manufacturer/model/series code.'),
   engineManufacturerModelCode: z
     .string()
     .optional()

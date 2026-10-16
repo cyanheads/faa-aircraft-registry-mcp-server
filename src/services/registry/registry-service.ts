@@ -27,6 +27,7 @@ import {
   decodeTypeEngine,
   decodeTypeRegistrant,
   decodeTypeReservation,
+  decodeWeightClass,
 } from './decode.js';
 import { createFaaIngester } from './ingest.js';
 import {
@@ -34,6 +35,7 @@ import {
   displayNNumber,
   isValidAircraftCode,
   isValidNNumber,
+  normalizeExactFilter,
   normalizeNNumber,
   toFtsMatch,
 } from './normalize.js';
@@ -193,7 +195,7 @@ export class RegistryService {
     return this.toRegistrationRecord(row);
   }
 
-  /** Decode a 7-char manufacturer/model/series code to aircraft specs. */
+  /** Decode a 6–7-character manufacturer/model/series code to aircraft specs. */
   async getAircraftType(codeInput: string, ctx: Context): Promise<AircraftTypeRecord | undefined> {
     await this.assertReady();
     const code = codeInput.trim().toUpperCase();
@@ -212,6 +214,13 @@ export class RegistryService {
   ): Promise<SearchPage<RegistrationSummary>> {
     await this.assertReady();
     const structured: QueryFilter[] = [];
+    const state = normalizeExactFilter(filters.state, 'state');
+    const aircraftType = normalizeExactFilter(filters.aircraftType, 'aircraftType');
+    const modeSCode = normalizeExactFilter(filters.modeSCode, 'modeSCode');
+    const manufacturerModelCode = filters.manufacturerModelCode?.trim().toUpperCase();
+    if (manufacturerModelCode && !isValidAircraftCode(manufacturerModelCode)) {
+      this.failInvalidCode(manufacturerModelCode);
+    }
     const matchTerms: string[] = [];
     /**
      * A free-text filter whose tokens all escape away (e.g. `"""`) can never
@@ -228,20 +237,21 @@ export class RegistryService {
     if (filters.makeModel) pushMatch(filters.makeModel, MAKE_MODEL_FTS_COLUMNS);
     if (filters.ownerName && this.ownerSearchEnabled)
       pushMatch(filters.ownerName, OWNER_FTS_COLUMNS);
-    if (filters.state)
-      structured.push({ column: 'state', op: 'eq', value: filters.state.trim().toUpperCase() });
-    if (filters.aircraftType) {
+    if (state) structured.push({ column: 'state', op: 'eq', value: state });
+    if (manufacturerModelCode)
+      structured.push({ column: 'mfr_mdl_code', op: 'eq', value: manufacturerModelCode });
+    if (aircraftType) {
       structured.push({
         column: 'aircraft_type_code',
         op: 'eq',
-        value: filters.aircraftType.trim().toUpperCase(),
+        value: aircraftType,
       });
     }
-    if (filters.modeSCode) {
+    if (modeSCode) {
       structured.push({
         column: 'mode_s_code_hex',
         op: 'eq',
-        value: filters.modeSCode.trim().toUpperCase(),
+        value: modeSCode,
       });
     }
 
@@ -281,6 +291,8 @@ export class RegistryService {
     const handle = await this.mirror.raw();
     const where: string[] = [];
     const params: (string | number)[] = [];
+    const aircraftType = normalizeExactFilter(filters.aircraftType, 'aircraftType');
+    const category = normalizeExactFilter(filters.category, 'category');
 
     if (filters.query) {
       const clause = toFtsMatch(filters.query, AIRCRAFT_REF_FTS_COLUMNS);
@@ -291,13 +303,13 @@ export class RegistryService {
       );
       params.push(clause);
     }
-    if (filters.aircraftType) {
+    if (aircraftType) {
       where.push('aircraft_type_code = ?');
-      params.push(filters.aircraftType.trim().toUpperCase());
+      params.push(aircraftType);
     }
-    if (filters.category) {
+    if (category) {
       where.push('category_code = ?');
-      params.push(filters.category.trim().toUpperCase());
+      params.push(category);
     }
 
     const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
@@ -476,6 +488,7 @@ export class RegistryService {
       nNumberDisplay: displayNNumber(nNumber),
       ownerRedacted: this.redactOwnerPii,
       make: str(row, 'make'),
+      manufacturerModelCode: str(row, 'mfr_mdl_code'),
       model: str(row, 'model'),
       yearManufactured: numZeroAsBlank(row, 'year_mfr'),
       state: str(row, 'state'),
@@ -500,6 +513,7 @@ export class RegistryService {
       numberOfEngines: num(row, 'num_engines'),
       numberOfSeats: numZeroAsBlank(row, 'num_seats'),
       weightClass: str(row, 'weight_class'),
+      weightClassLabel: decodeWeightClass(str(row, 'weight_class')),
       cruiseSpeedMph: numZeroAsBlank(row, 'cruise_speed'),
       typeCertificateDataSheet: str(row, 'tc_data_sheet'),
       typeCertificateDataHolder: str(row, 'tc_data_holder'),

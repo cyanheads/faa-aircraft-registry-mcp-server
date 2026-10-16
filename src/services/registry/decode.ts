@@ -78,35 +78,35 @@ const STATUS_CODE: Readonly<Record<string, string>> = {
   W: 'Certificate ineffective/invalid',
   X: 'Enforcement letter',
   Z: 'Permanent Reserved',
-  '1': 'Triennial form returned undeliverable',
-  '2': 'N-Number assigned but not registered',
-  '3': 'N-Number assigned as a reserved number, registration pending',
-  '4': 'N-Number assigned, certificate of registration mailed',
-  '5': 'Reserved N-Number, expired',
-  '6': 'Registration certificate revoked',
-  '7': 'Sale Reported',
-  '8': 'Second attempt to mail registration certificate returned',
-  '9': 'Certificate of registration revoked',
-  '10': 'N-Number change, new certificate mailed',
-  '11': 'N-Number cancelled',
-  '12': 'N-Number assigned, application for registration being processed',
+  '1': 'Triennial Aircraft Registration form returned by the Post Office as undeliverable',
+  '2': 'N-Number assigned but not yet registered',
+  '3': 'N-Number assigned as a Non Type Certificated aircraft but not yet registered',
+  '4': 'N-Number assigned as import but not yet registered',
+  '5': 'Reserved N-Number',
+  '6': 'Administratively canceled',
+  '7': 'Sale reported',
+  '8': 'Second attempt mailing a Triennial Aircraft Registration form to the owner with no response',
+  '9': 'Certificate of Registration revoked',
+  '10': 'N-Number assigned, not registered, pending cancellation',
+  '11': 'N-Number assigned as Non Type Certificated (Amateur), not registered, pending cancellation',
+  '12': 'N-Number assigned as import, not registered, pending cancellation',
   '13': 'Registration Expired',
-  '14': 'First notice for re-registration/renewal',
-  '15': 'Second notice for re-registration/renewal',
-  '16': 'Registration pending, application not yet processed',
-  '17': 'Sale reported, pending transfer',
-  '18': 'Registration expired, pending cancellation',
-  '19': 'Registration cancelled, expired',
-  '20': 'N-Number assigned but pending cancellation',
-  '21': 'Revoked, pending cancellation',
-  '22': 'Revoked-Canceled',
-  '23': 'Cancelled, out of the United States',
-  '24': 'Cancelled, exported',
-  '25': 'Cancelled, destroyed/scrapped',
-  '26': 'Cancelled, registration in error',
-  '27': 'Cancelled by request of owner',
-  '28': 'Cancelled, sold to a foreign owner',
-  '29': 'Cancelled, registration not renewed',
+  '14': 'First Notice for Re-Registration/Renewal',
+  '15': 'Second Notice for Re-Registration/Renewal',
+  '16': 'Registration Expired – Pending Cancellation',
+  '17': 'Sale Reported – Pending Cancellation',
+  '18': 'Sale Reported – Canceled',
+  '19': 'Registration Pending – Pending Cancellation',
+  '20': 'Registration Pending – Canceled',
+  '21': 'Revoked – Pending Cancellation',
+  '22': 'Revoked – Canceled',
+  '23': 'Expired Dealer (Pending Cancellation)',
+  '24': 'Third Notice for Re-Registration/Renewal',
+  '25': 'First Notice for Registration Renewal',
+  '26': 'Second Notice for Registration Renewal',
+  '27': 'Registration Expired',
+  '28': 'Third Notice for Registration Renewal',
+  '29': 'Registration Expired – Pending Cancellation',
 };
 
 /** Registrant's Region. */
@@ -150,6 +150,14 @@ const BUILDER_CERT: Readonly<Record<string, string>> = {
   '2': 'Light Sport',
 };
 
+/** ACFTREF Aircraft Weight — maximum gross takeoff weight in pounds. */
+const WEIGHT_CLASS: Readonly<Record<string, string>> = {
+  'CLASS 1': 'Maximum gross takeoff weight up to 12,499 lb',
+  'CLASS 2': 'Maximum gross takeoff weight 12,500–19,999 lb',
+  'CLASS 3': 'Maximum gross takeoff weight 20,000 lb and over',
+  'CLASS 4': 'Maximum gross takeoff weight: UAV up to 55 lb',
+};
+
 /** Type Reservation — RESERVED TR. */
 const TYPE_RESERVATION: Readonly<Record<string, string>> = {
   AA: 'Reserved — no fee',
@@ -174,6 +182,8 @@ export const decodeAirworthinessClass = (c?: string | null) => decode(AIRWORTHIN
 export const decodeAircraftCategory = (c?: string | null) => decode(AIRCRAFT_CATEGORY, c);
 export const decodeBuilderCert = (c?: string | null) => decode(BUILDER_CERT, c);
 export const decodeTypeReservation = (c?: string | null) => decode(TYPE_RESERVATION, c);
+/** Decode the FAA maximum gross takeoff weight range without replacing the raw class. */
+export const decodeWeightClass = (c?: string | null) => decode(WEIGHT_CLASS, c);
 
 /** Fractional-owner flag — `Y` means fractional ownership; blank means not. */
 export function decodeFractionalOwner(c?: string | null): boolean {

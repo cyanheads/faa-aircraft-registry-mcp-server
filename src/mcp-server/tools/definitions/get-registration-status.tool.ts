@@ -70,7 +70,7 @@ export const getRegistrationStatusTool = tool('faa_get_registration_status', {
     manufacturerModelCode: z
       .string()
       .optional()
-      .describe('7-char manufacturer/model/series code (deregistered records).'),
+      .describe('6–7-character manufacturer/model/series code (deregistered records).'),
     modeSCodeHex: z
       .string()
       .optional()

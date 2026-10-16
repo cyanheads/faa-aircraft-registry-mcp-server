@@ -156,7 +156,7 @@ describe('RegistryService — registration status resolution', () => {
     expect(s.recordType).toBe('deregistered');
     if (s.recordType === 'deregistered') {
       expect(s.cancelDate).toBe('2020-06-15');
-      expect(s.status).toEqual({ code: '22', label: 'Revoked-Canceled' });
+      expect(s.status).toEqual({ code: '22', label: 'Revoked – Canceled' });
       expect(s.modeSCodeHex).toBe('DEADBE');
     }
   });
@@ -188,6 +188,54 @@ describe('RegistryService — search truncation disclosure', () => {
     await service.mirrorInstance.close();
   });
 
+  it('normalizes padded exact filters and accepts absent military/territory combinations', async () => {
+    const matched = await service.searchRegistrations(
+      { state: ' wa ', modeSCode: ' a4e2d9 ', aircraftType: ' 4 ', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(matched.items.map((r) => r.nNumber)).toEqual(['12345']);
+    for (const state of ['AE', 'AP', 'GU', 'PR', 'ZZ']) {
+      expect(
+        (await service.searchRegistrations({ state, limit: 25, offset: 0 }, ctx)).items,
+      ).toEqual([]);
+    }
+    expect(
+      (
+        await service.searchAircraftTypes(
+          { aircraftType: ' h ', category: ' 3 ', limit: 25, offset: 0 },
+          ctx,
+        )
+      ).items,
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['state', 'Washington', 'invalid_state'],
+    ['state', 'W1', 'invalid_state'],
+    ['state', 'éA', 'invalid_state'],
+    ['modeSCode', 'NOTHEX', 'invalid_mode_s_code'],
+    ['modeSCode', 'A4E2D', 'invalid_mode_s_code'],
+    ['aircraftType', '99', 'invalid_aircraft_type'],
+    ['aircraftType', '0', 'invalid_aircraft_type'],
+  ])('rejects malformed registration %s alongside a valid filter', async (field, value, reason) => {
+    await expect(
+      service.searchRegistrations(
+        { makeModel: 'cessna', [field]: value, limit: 25, offset: 0 },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError, data: { reason } });
+  });
+
+  it.each([
+    ['aircraftType', '99', 'invalid_aircraft_type'],
+    ['category', '9', 'invalid_category'],
+    ['category', 'Land', 'invalid_category'],
+  ])('rejects malformed aircraft %s even with unmatchable text', async (field, value, reason) => {
+    await expect(
+      service.searchAircraftTypes({ query: '"""', [field]: value, limit: 25, offset: 0 }, ctx),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError, data: { reason } });
+  });
+
   it('flags truncated=true when the cap is hit', async () => {
     // Two Cessnas in the fixture; a limit of 1 must disclose truncation.
     const page = await service.searchRegistrations(
@@ -205,6 +253,48 @@ describe('RegistryService — search truncation disclosure', () => {
       ctx,
     );
     expect(page.truncated).toBe(false);
+  });
+
+  it('broad name search includes registrations with distinct same-name reference codes', async () => {
+    const handle = await service.mirrorInstance.raw();
+    handle
+      .prepare('UPDATE registration SET mfr_mdl_code = ? WHERE n_number = ?')
+      .run('2072715', '5RP');
+    const page = await service.searchRegistrations(
+      { makeModel: 'cessna 172s', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(page.items.map((r) => r.nNumber)).toEqual(['12345', '5RP']);
+  });
+
+  it('selects an exact aircraft code independently of shared names', async () => {
+    const handle = await service.mirrorInstance.raw();
+    handle
+      .prepare('UPDATE registration SET mfr_mdl_code = ? WHERE n_number = ?')
+      .run('2072715', '5RP');
+    const page = await service.searchRegistrations(
+      { manufacturerModelCode: ' 2072714 ', limit: 25, offset: 0 },
+      ctx,
+    );
+    expect(page.items.map((r) => r.nNumber)).toEqual(['12345']);
+    expect(page.items[0]?.manufacturerModelCode).toBe('2072714');
+    expect(
+      (
+        await service.searchRegistrations(
+          { manufacturerModelCode: '2072714', state: 'AK', limit: 25, offset: 0 },
+          ctx,
+        )
+      ).items,
+    ).toEqual([]);
+  });
+
+  it('rejects a malformed aircraft code even alongside valid filters', async () => {
+    await expect(
+      service.searchRegistrations(
+        { manufacturerModelCode: 'ABC', state: 'WA', limit: 25, offset: 0 },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ data: { reason: 'invalid_code' } });
   });
 });
 

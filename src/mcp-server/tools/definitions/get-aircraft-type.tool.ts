@@ -1,5 +1,5 @@
 /**
- * @fileoverview faa_get_aircraft_type — decode a 7-char manufacturer/model/series
+ * @fileoverview faa_get_aircraft_type — decode a 6–7-character manufacturer/model/series
  * code to aircraft specs from the ACFTREF reference table: make, model, category,
  * aircraft type, engine type, engine count, seats, weight class, cruise speed,
  * and type-certificate data. The discovery counterpart is faa_search_aircraft_types.
@@ -14,7 +14,7 @@ import { codedValueSchema, renderCoded } from './_schemas.js';
 export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
   title: 'faa-aircraft-registry-mcp-server: get aircraft type',
   description:
-    'Decode a 7-character FAA manufacturer/model/series code to aircraft specifications — manufacturer, model, aircraft category, aircraft type, engine type, number of engines, number of seats, weight class, cruise speed, and type-certificate data sheet/holder. Use faa_search_aircraft_types first to discover a code by manufacturer or model name.',
+    'Decode a 6–7-character FAA manufacturer/model/series code to aircraft specifications — manufacturer, model, aircraft category, aircraft type, engine type, number of engines, number of seats, weight class, cruise speed, and type-certificate data sheet/holder. Use faa_search_aircraft_types first to discover a code by manufacturer or model name.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -27,7 +27,7 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
   }),
 
   output: z.object({
-    code: z.string().describe('The 7-char manufacturer/model/series code.'),
+    code: z.string().describe('The 6–7-character manufacturer/model/series code.'),
     manufacturer: z.string().optional().describe('Aircraft manufacturer name.'),
     model: z.string().optional().describe('Aircraft model name.'),
     aircraftType: codedValueSchema.optional().describe('Aircraft type as code + label.'),
@@ -52,6 +52,12 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
       .string()
       .optional()
       .describe('Weight class as the literal FAA string (e.g. "CLASS 1").'),
+    weightClassLabel: z
+      .string()
+      .optional()
+      .describe(
+        'FAA maximum gross takeoff weight range in pounds; omitted when the raw weight class is unknown.',
+      ),
     cruiseSpeedMph: z
       .number()
       .optional()
@@ -103,6 +109,7 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
     if (r.numberOfEngines !== undefined) lines.push(`**Engines:** ${r.numberOfEngines}`);
     if (r.numberOfSeats !== undefined) lines.push(`**Seats:** ${r.numberOfSeats}`);
     if (r.weightClass) lines.push(`**Weight class:** ${r.weightClass}`);
+    if (r.weightClassLabel) lines.push(`**Weight class range:** ${r.weightClassLabel}`);
     if (r.cruiseSpeedMph !== undefined) lines.push(`**Cruise speed:** ${r.cruiseSpeedMph} mph`);
     if (r.typeCertificateDataSheet) lines.push(`**TC data sheet:** ${r.typeCertificateDataSheet}`);
     if (r.typeCertificateDataHolder)

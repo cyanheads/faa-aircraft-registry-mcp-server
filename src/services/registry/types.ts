@@ -77,7 +77,7 @@ export interface AircraftTypeRecord {
   aircraftType?: CodedValue;
   builderCertification?: CodedValue;
   category?: CodedValue;
-  /** 7-char manufacturer/model/series code. */
+  /** 6–7-character manufacturer/model/series code. */
   code: string;
   cruiseSpeedMph?: number;
   engineType?: CodedValue;
@@ -89,12 +89,15 @@ export interface AircraftTypeRecord {
   typeCertificateDataSheet?: string;
   /** Literal weight class string (e.g. `CLASS 1`). */
   weightClass?: string;
+  /** Maximum gross takeoff weight range, omitted when the raw class is unknown. */
+  weightClassLabel?: string;
 }
 
 /** A summary row from a registration search (decoded, redaction-aware). */
 export interface RegistrationSummary {
   aircraftType?: CodedValue;
   make?: string;
+  manufacturerModelCode?: string;
   model?: string;
   modeSCodeHex?: string;
   nNumber: string;
@@ -161,6 +164,7 @@ export interface RegistrationSearchFilters {
   aircraftType?: string;
   limit: number;
   makeModel?: string;
+  manufacturerModelCode?: string;
   modeSCode?: string;
   /** Zero-based index of the first row to return. */
   offset: number;

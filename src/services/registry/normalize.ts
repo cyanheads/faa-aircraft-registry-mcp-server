@@ -5,6 +5,49 @@
  * @module services/registry/normalize
  */
 
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
+
+/** Normalize an exact FAA search key and reject malformed nonblank values. */
+export function normalizeExactFilter(
+  input: string | undefined,
+  field: 'state' | 'modeSCode' | 'aircraftType' | 'category',
+): string | undefined {
+  const value = input?.trim().toUpperCase();
+  if (!value) return;
+  const rules = {
+    state: {
+      length: 2,
+      pattern: /^[A-Z]{2}$/,
+      reason: 'invalid_state',
+      expected:
+        'two ASCII letters, including territory and military postal codes such as GU, AE or AP',
+    },
+    modeSCode: {
+      length: 6,
+      pattern: /^[0-9A-F]{6}$/,
+      reason: 'invalid_mode_s_code',
+      expected: 'six hexadecimal characters, such as A4E2D9',
+    },
+    aircraftType: {
+      length: 1,
+      pattern: /^[1-9HO]$/,
+      reason: 'invalid_aircraft_type',
+      expected: 'one FAA aircraft type code: 1–9, H or O',
+    },
+    category: {
+      length: 1,
+      pattern: /^[1-3]$/,
+      reason: 'invalid_category',
+      expected: 'one FAA category code: 1 (Land), 2 (Sea) or 3 (Amphibian)',
+    },
+  } as const;
+  const rule = rules[field];
+  if (value.length !== rule.length || !rule.pattern.test(value)) {
+    throw validationError(`Invalid ${field}. Expected ${rule.expected}.`, { reason: rule.reason });
+  }
+  return value;
+}
+
 /**
  * Canonicalize an N-number to the registry's storage form: uppercase, no leading
  * `N`, no internal whitespace. Accepts `N12345`, `n12345`, or `12345`. The FAA

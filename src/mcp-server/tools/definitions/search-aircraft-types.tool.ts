@@ -1,6 +1,6 @@
 /**
  * @fileoverview faa_search_aircraft_types — search the aircraft reference table by
- * manufacturer/model name, aircraft type, or category to discover the 7-char
+ * manufacturer/model name, aircraft type, or category to discover the 6–7-character
  * manufacturer/model codes and browse specs. Fills the discovery gap before
  * faa_get_aircraft_type. Discloses the total match count and pages via offset.
  * @module mcp-server/tools/definitions/search-aircraft-types.tool
@@ -16,7 +16,7 @@ const aircraftTypeSummarySchema = z
     code: z
       .string()
       .describe(
-        '7-char manufacturer/model/series code — pass to faa_get_aircraft_type for full specs.',
+        '6–7-character manufacturer/model/series code — pass to faa_get_aircraft_type for full specs or faa_search_registrations as manufacturerModelCode for exact registration matches.',
       ),
     manufacturer: z.string().optional().describe('Aircraft manufacturer name.'),
     model: z.string().optional().describe('Aircraft model name.'),
@@ -34,7 +34,7 @@ const aircraftTypeSummarySchema = z
 export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
   title: 'faa-aircraft-registry-mcp-server: search aircraft types',
   description:
-    'Search FAA aircraft types by manufacturer/model name, aircraft type code, or category code to discover 7-character manufacturer/model/series codes and browse specifications. Use this before faa_get_aircraft_type to find a code by name. At least one filter is required. Every response reports totalCount (all matches, not just this page); when more remain, it returns nextOffset — pass it back as offset to page forward.',
+    'Search FAA aircraft types by manufacturer/model name, aircraft type code, or category code to discover 6–7-character manufacturer/model/series codes and browse specifications. Pass a code to faa_get_aircraft_type for specs or faa_search_registrations as manufacturerModelCode for exact registration matches, then faa_lookup_registration for details. At least one filter is required. Every response reports totalCount (all matches, not just this page); when more remain, it returns nextOffset — pass it back as offset to page forward.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -42,11 +42,15 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
     aircraftType: z
       .string()
       .optional()
-      .describe('Aircraft type code to match exactly (e.g. "6" for rotorcraft).'),
+      .describe(
+        'FAA aircraft type code: 1–9, H (Hybrid Lift), O (Other), exact match. Trimmed and uppercased; blank is unset.',
+      ),
     category: z
       .string()
       .optional()
-      .describe('Aircraft category code to match exactly (1 Land, 2 Sea, 3 Amphibian).'),
+      .describe(
+        'Aircraft category code: 1 (Land), 2 (Sea), 3 (Amphibian), exact match. Trimmed; blank is unset.',
+      ),
     limit: z
       .number()
       .int()
@@ -99,6 +103,20 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
   },
 
   errors: [
+    {
+      reason: 'invalid_aircraft_type',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'aircraftType is not 1–9, H or O.',
+      recovery: 'Provide aircraftType as 1–9, H (Hybrid Lift) or O (Other).',
+    },
+    {
+      reason: 'invalid_category',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'category is not 1, 2 or 3.',
+      recovery: 'Provide category as 1 (Land), 2 (Sea) or 3 (Amphibian).',
+    },
     {
       reason: 'no_filters',
       code: JsonRpcErrorCode.ValidationError,
