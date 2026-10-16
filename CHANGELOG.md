@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-10-16
+
+Registry validation and aircraft-code discovery: exact manufacturer/model search, decoded weight ranges, corrected status labels, and archive completeness checks.
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-10-08
 
 mcp-ts-core 0.13.6 → 0.13.14: tool errors carry a requestId and no longer expose stack traces or request context; an integer nNumber, a numeric-string limit/offset, and null for an optional filter are repaired instead of rejected; the Docker image builds multi-arch without QEMU.
