@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/faa-aircraft-registry-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Ffaa-aircraft-registry-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/faa-aircraft-registry-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/faa-aircraft-registry-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Ffaa-aircraft-registry-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/faa-aircraft-registry-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -37,7 +37,7 @@ The US civil aircraft registry, mirrored offline from the FAA's Releasable Aircr
 |:---|:---|
 | `faa_lookup_registration` | Decode one N-number to its full pre-joined active record — aircraft make/model, engine, year, airworthiness, registration status, Mode S code, and registered owner (when redaction is off). |
 | `faa_get_registration_status` | Resolve an N-number across all three status files (active, deregistered, reserved) in priority order, returning a definitive `recordType`. |
-| `faa_search_registrations` | Search active registrations by owner name, make/model, state, aircraft type, or Mode S code. |
+| `faa_search_registrations` | Search active registrations by owner name, make/model, exact manufacturer/model code, state, aircraft type, or Mode S code. |
 | `faa_search_aircraft_types` | Search the aircraft reference table by manufacturer/model name, type, or category to discover manufacturer-model codes. |
 | `faa_get_aircraft_type` | Decode a 6–7-character manufacturer/model/series code to aircraft specs — category, type, engine, seats, weight class, cruise speed, type-certificate data. |
 
@@ -73,18 +73,21 @@ Also reachable via `faa_lookup_registration`; search collections aren't exposed 
 
 ### `faa_search_registrations` <sub>tool</sub>
 
-- Filters: `ownerName`, `makeModel`, `state`, `aircraftType`, `modeSCode` — at least one required
+- Filters: `ownerName`, `makeModel`, `manufacturerModelCode`, `state`, `aircraftType`, `modeSCode` — at least one required, AND-combined
+- `manufacturerModelCode` matches an exact 6–7-character alphanumeric reference code (trimmed and uppercased; blank is unset). Discover it with `faa_search_aircraft_types`, search registrations by that code, then use `faa_lookup_registration` for details. Summaries include the stored code when present.
+- Exact filters trim and uppercase: `state` is two ASCII letters (including territories and AE/AP), `modeSCode` is six hex characters, and `aircraftType` is 1–9/H/O. Blank is unset; malformed values return `invalid_state`, `invalid_mode_s_code` or `invalid_aircraft_type` with recovery guidance.
 - Owner-name search disabled when `FAA_REDACT_OWNER_PII` is on; typed `owner_search_disabled` error names the alternative filters
 - `limit` 1–200 (default 25) and `offset` pagination; every response reports `totalCount`, and a truncated page carries `nextOffset`
 - Each result carries an N-number to pass to `faa_lookup_registration` for full detail
-- Typed error: `no_filters` when no filter is supplied
+- Typed errors: `no_filters` when no filter is supplied; `invalid_code` for malformed `manufacturerModelCode`
 
 ---
 
 ### `faa_search_aircraft_types` <sub>tool</sub>
 
 - Filters: `query` (manufacturer/model name, full-text), `aircraftType` code, `category` code — at least one required
-- Returns reference summaries with the code to pass to `faa_get_aircraft_type`
+- `aircraftType` accepts 1–9/H/O and `category` accepts 1–3. Exact filters trim and uppercase; blank is unset. Malformed values return `invalid_aircraft_type` or `invalid_category`; valid absent combinations return an empty page.
+- Returns reference summaries with the code to pass to `faa_get_aircraft_type` for specs or `faa_search_registrations.manufacturerModelCode` for exact registrations
 - `limit` 1–200 (default 25) and `offset` pagination; every response reports `totalCount`, and a truncated page carries `nextOffset`
 - Typed error: `no_filters` when no filter is supplied
 
@@ -94,6 +97,7 @@ Also reachable via `faa_lookup_registration`; search collections aren't exposed 
 
 - Accepts a 6–7-character uppercase alphanumeric manufacturer/model/series code
 - Returns manufacturer, model, aircraft type, engine type, category, builder certification, seats, engines, weight class, cruise speed, and type-certificate data
+- `weightClass` preserves the raw FAA string; optional `weightClassLabel` decodes maximum gross takeoff weight: CLASS 1 up to 12,499 lb, CLASS 2 12,500–19,999 lb, CLASS 3 20,000 lb and over, CLASS 4 UAV up to 55 lb. Unknown classes keep their raw value without a label; blank values omit both.
 - Discover codes by name first via `faa_search_aircraft_types`
 - Typed errors: `not_found` (well-formed code, no reference record), `invalid_code` (malformed input)
 
@@ -144,6 +148,8 @@ A public instance is available at `https://faa-aircraft-registry.caseyjhand.com/
 ### Self-Hosted / Local
 
 > **First run requires building the local index — see [First-run setup](#first-run-setup) below.** The package does not ship the FAA data; until `mirror:init` has run once, queries fail with a clear "run mirror:init" error.
+
+The Desktop MCPB currently omits Node's SQLite dependency ([#18](https://github.com/cyanheads/faa-aircraft-registry-mcp-server/issues/18)); use the hosted endpoint, Bun, or Docker while that packaging issue is open.
 
 Add the following to your MCP client configuration file:
 
@@ -215,7 +221,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 The FAA Releasable Aircraft Database is not bundled with the package — it is a public dataset (~70 MB compressed, refreshed daily by the FAA) that the operator downloads and indexes once before first use. Building the index produces a local SQLite file of a few hundred MB.
 
-After installing, build the index out-of-band (never on server startup — a full parse of ~1M rows must not block start):
+From a source checkout, build the index out-of-band (never on server startup — a full parse of ~1M rows must not block start). The Docker image also supports these commands. The npm-installed mirror scripts currently cannot resolve their source imports ([#17](https://github.com/cyanheads/faa-aircraft-registry-mcp-server/issues/17)); build the index from a checkout or Docker and point the installed server at that file:
 
 ```sh
 # Build the local index from the live FAA download (idempotent, resumable)

@@ -2,10 +2,10 @@
 
 **Server:** faa-aircraft-registry-mcp-server
 **Version:** 0.1.10
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.14`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0 (protocol revisions 2026-07-28 and 2025-*)
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1 (protocol revisions 2026-07-28 and 2025-*)
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -273,7 +273,7 @@ src/
       get-registration-status.tool.ts   # cross-file status resolver (active/deregistered/reserved/unknown)
       search-registrations.tool.ts      # FTS5 search of active registrations
       search-aircraft-types.tool.ts     # FTS5 search of the aircraft reference table
-      get-aircraft-type.tool.ts         # decode a 7-char mfr/model/series code
+      get-aircraft-type.tool.ts         # decode a 6–7-character mfr/model/series code
     resources/definitions/
       registration.resource.ts          # faa://registration/{nNumber} (reuses the lookup handler)
 scripts/
