@@ -4,9 +4,9 @@
  * registry service from the environment and hands back the underlying mirror —
  * no MCP transport, no tool registration — and initializes the framework logger
  * so the scripts' status/progress output is actually emitted. Imported by the
- * three named scripts, so it must travel with them in the npm tarball and the
- * Docker image.
- * @module scripts/_mirror-context
+ * three named scripts, compiled with the server into dist/cli for npm, MCPB,
+ * and Docker distribution.
+ * @module cli/_mirror-context
  */
 
 import type { Mirror } from '@cyanheads/mcp-ts-core/mirror';

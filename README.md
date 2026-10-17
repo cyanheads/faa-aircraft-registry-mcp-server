@@ -29,7 +29,7 @@
 
 ## Overview
 
-The US civil aircraft registry, mirrored offline from the FAA's Releasable Aircraft Database — there is no live FAA registry API. Decode an N-number to its aircraft, engine, and registered owner; resolve active, deregistered, or reserved status; search by owner, make/model, state, or Mode S code; and decode manufacturer/model codes to full aircraft specs. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+The US civil aircraft registry, searchable offline from the FAA's Releasable Aircraft Database. Decode an N-number to its aircraft, engine, and registered owner; check whether it's active, deregistered, or reserved; and search by owner, make and model, state, or Mode S code.
 
 ### Tools
 
@@ -149,7 +149,7 @@ A public instance is available at `https://faa-aircraft-registry.caseyjhand.com/
 
 > **First run requires building the local index — see [First-run setup](#first-run-setup) below.** The package does not ship the FAA data; until `mirror:init` has run once, queries fail with a clear "run mirror:init" error.
 
-The Desktop MCPB currently omits Node's SQLite dependency ([#18](https://github.com/cyanheads/faa-aircraft-registry-mcp-server/issues/18)); use the hosted endpoint, Bun, or Docker while that packaging issue is open.
+The Desktop MCPB includes Node's SQLite driver and its cross-platform prebuilts. Build the local index with the bundle's mirror CLI before querying.
 
 Add the following to your MCP client configuration file:
 
@@ -221,17 +221,17 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 The FAA Releasable Aircraft Database is not bundled with the package — it is a public dataset (~70 MB compressed, refreshed daily by the FAA) that the operator downloads and indexes once before first use. Building the index produces a local SQLite file of a few hundred MB.
 
-From a source checkout, build the index out-of-band (never on server startup — a full parse of ~1M rows must not block start). The Docker image also supports these commands. The npm-installed mirror scripts currently cannot resolve their source imports ([#17](https://github.com/cyanheads/faa-aircraft-registry-mcp-server/issues/17)); build the index from a checkout or Docker and point the installed server at that file:
+Build the index out-of-band (never on server startup — a full parse of ~1M rows must not block start). From a source checkout, run `bun install && bun run build` first. Then, from the checkout, installed package directory, or extracted MCPB directory, run the compiled commands below. Node and Bun both work; replace `node` with `bun` to use Bun's built-in SQLite. The Docker image supports `bun run mirror:init`, `mirror:verify`, and `mirror:refresh`.
 
 ```sh
 # Build the local index from the live FAA download (idempotent, resumable)
-FAA_MIRROR_PATH=/path/to/faa-registry.db bun run mirror:init
+FAA_MIRROR_PATH=/path/to/faa-registry.db node dist/cli/faa-mirror-init.js
 
 # Verify it built (readiness + integrity check)
-FAA_MIRROR_PATH=/path/to/faa-registry.db bun run mirror:verify
+FAA_MIRROR_PATH=/path/to/faa-registry.db node dist/cli/faa-mirror-verify.js
 
 # Rebuild from the latest FAA release (run on a schedule, or out-of-band for stdio)
-FAA_MIRROR_PATH=/path/to/faa-registry.db bun run mirror:refresh
+FAA_MIRROR_PATH=/path/to/faa-registry.db node dist/cli/faa-mirror-refresh.js
 ```
 
 - **Keep the path stable.** Point `FAA_MIRROR_PATH` (and the same env var in your MCP client config) at a persistent location so the built index is reused across runs. Default: `.mirror/faa-registry.db`.
@@ -243,7 +243,7 @@ The source URL is overridable via `FAA_DATABASE_URL` (for a private or cached mi
 
 ### Prerequisites
 
-- [Bun v1.4](https://bun.sh/) or higher (or Node.js v24+). `bun:sqlite` is built into Bun; a Node-only deployment adds `better-sqlite3` (already declared as an optional peer dependency).
+- [Bun v1.4](https://bun.sh/) or higher (or Node.js v24+). Bun uses built-in `bun:sqlite`; Node uses the included `better-sqlite3` dependency, with bundled N-API prebuilts for macOS, Windows, and Linux (glibc/musl), on x64 and arm64.
 - Disk space for the built index (a few hundred MB) at `FAA_MIRROR_PATH`.
 - Network access at `mirror:init` / `mirror:refresh` time to download the FAA ZIP. Not needed at query time.
 
@@ -269,9 +269,10 @@ cd faa-aircraft-registry-mcp-server
 bun install
 ```
 
-4. **Build the index** (see [First-run setup](#first-run-setup)):
+4. **Compile the server and build the index** (see [First-run setup](#first-run-setup)):
 
 ```sh
+bun run build
 bun run mirror:init
 ```
 
@@ -326,7 +327,8 @@ The FAA registry is releasable public record, but `MASTER`, `DEREG`, and `RESERV
 
   ```sh
   bun run devcheck   # Lint, format, typecheck, security
-  bun run test       # Vitest test suite
+  bun run test       # Vitest unit and integration tests
+  bun run test:package # npm tarball + cleaned MCPB runtime checks
   bun run lint:mcp   # Validate MCP definitions against spec
   ```
 
@@ -351,7 +353,7 @@ The Dockerfile defaults to HTTP transport with stateless sessions, ships the `mi
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). |
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). |
 | `src/services/registry` | Registry service — the SQLite + FTS5 mirror, ingester, decode maps, N-number normalizer, and the owner-PII redaction gate. |
-| `scripts/faa-mirror-*.ts` | Mirror lifecycle CLI — `mirror:init`, `mirror:refresh`, `mirror:verify`. |
+| `src/cli/` | Mirror lifecycle CLI — compiled to `dist/cli/` for `mirror:init`, `mirror:refresh`, `mirror:verify`. |
 | `tests/` | Unit and integration tests mirroring `src/`. |
 
 ## Development guide

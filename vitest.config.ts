@@ -23,7 +23,12 @@ export default mergeConfig(
           test: {
             name: 'unit',
             include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
-            exclude: ['tests/smoke/**', 'tests/integration/**', 'tests/fuzz/**'],
+            exclude: [
+              'tests/smoke/**',
+              'tests/integration/**',
+              'tests/fuzz/**',
+              'tests/package/**',
+            ],
           },
         },
         // Add more projects as your suite grows. Each inherits the framework's
@@ -51,6 +56,15 @@ export default mergeConfig(
             include: ['tests/integration/**/*.test.ts'],
             maxWorkers: 1,
             testTimeout: 30_000,
+          },
+        },
+        {
+          extends: true,
+          test: {
+            name: 'package',
+            include: ['tests/package/**/*.test.ts'],
+            maxWorkers: 1,
+            testTimeout: 60_000,
           },
         },
       ],

@@ -10,7 +10,7 @@
 
 import { logger } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, describe, expect, it } from 'vitest';
-import { initCliLogging } from '../../scripts/_mirror-context.js';
+import { initCliLogging } from '../../src/cli/_mirror-context.js';
 
 describe('mirror CLI bootstrap — logging (issue #8)', () => {
   afterEach(async () => {

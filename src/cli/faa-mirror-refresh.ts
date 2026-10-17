@@ -1,11 +1,11 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * @fileoverview mirror:refresh — rebuild the FAA registry index from the latest
  * Releasable Aircraft Database ZIP. The FAA daily release is a full snapshot, so
  * a refresh performs a full rebuild; the index stays transactionally queryable
  * throughout. Run out-of-band for stdio deployments (the HTTP server schedules
  * this on a daily cron itself).
- * @module scripts/faa-mirror-refresh
+ * @module cli/faa-mirror-refresh
  */
 
 import { logger } from '@cyanheads/mcp-ts-core/utils';

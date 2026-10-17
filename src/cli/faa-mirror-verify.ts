@@ -1,16 +1,17 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * @fileoverview mirror:verify — report the FAA registry index health: readiness,
  * sync status, last completion, record count, and a SQLite integrity check.
  * Exits non-zero when the mirror is not ready or integrity fails, so it can gate
  * a deployment or a post-build smoke check.
- * @module scripts/faa-mirror-verify
+ * @module cli/faa-mirror-verify
  */
 
-import { logger } from '@cyanheads/mcp-ts-core/utils';
+import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 import { getMirror, initCliLogging } from './_mirror-context.js';
 
 await initCliLogging();
+const context = requestContextService.createRequestContext({ operation: 'mirror:verify' });
 const mirror = getMirror();
 const status = await mirror.status();
 const recordCount = await mirror.store.count();
@@ -21,7 +22,7 @@ logger.info(
 if (status.error) logger.warning(`Last sync error: ${status.error}`);
 
 if (!status.ready) {
-  logger.error('Mirror is NOT ready — run mirror:init to build the index.');
+  logger.error('Mirror is NOT ready — run mirror:init to build the index.', context);
   await mirror.close();
   process.exit(1);
 }
@@ -33,6 +34,7 @@ if (!status.ready) {
 if (recordCount === 0) {
   logger.error(
     'Mirror reports ready but the registration table is EMPTY — a rebuild was likely interrupted. Re-run mirror:init (or mirror:refresh) to rebuild the index.',
+    context,
   );
   await mirror.close();
   process.exit(1);
@@ -40,7 +42,7 @@ if (recordCount === 0) {
 
 const integrity = await mirror.store.integrityCheck();
 if (!integrity.ok) {
-  logger.error(`SQLite integrity check FAILED: ${integrity.results.join('; ')}`);
+  logger.error(`SQLite integrity check FAILED: ${integrity.results.join('; ')}`, context);
   await mirror.close();
   process.exit(1);
 }

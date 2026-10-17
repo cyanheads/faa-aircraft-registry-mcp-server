@@ -170,8 +170,8 @@ and to rebuild per process) and is far below the external-store threshold. SQLit
 the relational join (`MASTER`→`ACFTREF`→`ENGINE`), full-text owner/make-model search, and
 indexed exact lookups (N-number, Mode S code, mfr-model code) in one embedded file with zero
 runtime services. `bun:sqlite` is built into the Bun runtime (the Docker base and dev
-runtime), so the primary path needs no native dependency; a Node-only deployment adds
-`better-sqlite3` as an optional peer. The mirror is unavailable on Cloudflare Workers (no
+runtime). Node uses the production dependency `better-sqlite3`, whose cross-platform
+N-API prebuilts are retained in the cleaned MCPB. The mirror is unavailable on Cloudflare Workers (no
 SQLite / no persistent FS) — this server targets stdio + Node/Bun HTTP, not Workers.
 
 ### Ingest strategy — initialized out-of-band, refreshed daily
@@ -204,9 +204,10 @@ the canonical "mirror a bulk upstream" case. Two competing framings from the bri
   result.
 
 The `Dockerfile` pre-creates the writable `.mirror` data directory owned by the runtime user
-and copies the three lifecycle scripts (`mirror:init`, `mirror:refresh`, `mirror:verify`) plus
-the `_mirror-context.ts` shim into the image. The same scripts are included in `package.json`
-`files[]` for npm consumers.
+and copies `dist/` into the image, including the compiled lifecycle commands
+(`mirror:init`, `mirror:refresh`, `mirror:verify`) and their shared bootstrap under `dist/cli/`.
+The npm package and MCPB ship the same compiled modules with relative imports, so the CLI
+shares the server's registry implementation without source files or runtime path aliases.
 
 ### Index schema (mirror store)
 
@@ -270,11 +271,11 @@ Goes in `src/config/server-config.ts` as its own Zod schema, lazy-parsed via `pa
    surface — never a Title Case display name) and a short `instructions` string noting the
    offline/keyless nature and the redaction default.
 2. **`registry-service`** — `defineMirror` + `sqliteMirrorStore` schema; the `sync` ingester
-   (download ZIP → parse five `.txt` files → pre-join → yield rows); decode maps; the
+   (download ZIP → parse MASTER parts and reference/status files → pre-join → yield rows); decode maps; the
    N-number normalizer; the redaction gate (single chokepoint that strips PII fields and
    flips `ownerRedacted`). Mirror lifecycle CLI scripts (`mirror:init/refresh/verify`) +
-   `_mirror-context.ts`; wire daily `mirror:refresh` via `schedulerService` in `setup()`;
-   un-comment the Dockerfile mirror stanza; add scripts to `package.json` `files[]`.
+   `src/cli/_mirror-context.ts`; compile them to `dist/cli/` for npm, MCPB, and Docker;
+   wire daily `mirror:refresh` via `schedulerService` in `setup()`.
 3. **Read-only tools** — `faa_lookup_registration`, `faa_get_aircraft_type` (the two exact-key
    lookups) first; then `faa_search_registrations`, `faa_search_aircraft_types` (FTS5); then
    `faa_get_registration_status` (multi-file resolution).
@@ -327,8 +328,8 @@ each branch validated separately so `format()`-parity holds per branch).
   + several-hundred-k deregistered + reference tables ≈ 10⁶ rows) is mid-tier: too large for a
   comfortable in-memory rebuild-per-process, far below an external store. SQLite delivers the
   relational join, FTS5 search, and indexed exact lookups in one embedded file with no runtime
-  service. `bun:sqlite` is built in (no native dep on the Bun/Docker path); Node deployments
-  add `better-sqlite3` as an optional peer. Not Workers-portable (no SQLite there) — acceptable
+  service. Bun uses built-in `bun:sqlite`; Node uses the included `better-sqlite3` dependency
+  and its bundled N-API prebuilts. Not Workers-portable (no SQLite there) — acceptable
   because this server targets stdio + Node/Bun HTTP.
 - **Ingest = initialized out-of-band, refreshed daily — never on startup.** A full parse+join
   of ~1M rows must not block server start. The operator runs `mirror:init` once against a

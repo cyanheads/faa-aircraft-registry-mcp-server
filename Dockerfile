@@ -21,10 +21,8 @@ WORKDIR /usr/src/app
 # Copy dependency manifests for optimized layer caching
 COPY package.json bun.lock ./
 
-# Install all dependencies (including dev dependencies for building). Skip
-# lifecycle scripts so the optional `better-sqlite3` native addon isn't compiled
-# (node-gyp toolchain is absent on the bun base image) — the runtime uses Bun's
-# built-in `bun:sqlite`, so the addon is never loaded in this image.
+# Install all dependencies (including dev dependencies for building). The runtime
+# uses Bun's built-in `bun:sqlite`; better-sqlite3 ships prebuilts for Node users.
 # The BuildKit cache mount persists Bun's global package cache across builds.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile --ignore-scripts
@@ -77,8 +75,7 @@ RUN case "$TARGETARCH" in \
 # Install only production dependencies, ignoring any lifecycle scripts (like 'prepare')
 # that are not needed in the final production image.
 # `--omit=peer` drops the framework's optional peer tiers (test runner, service
-# SDKs, parsers) that Bun would otherwise auto-install, and this server's own
-# optional `better-sqlite3` peer (the image runs on `bun:sqlite`). Anything this
+# SDKs, parsers) that Bun would otherwise auto-install. Anything this
 # server actually imports belongs in its own `dependencies`, so nothing needed at
 # runtime is lost.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
@@ -141,17 +138,8 @@ COPY --from=deps /usr/src/app/node_modules ./node_modules
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
 
-# Mirror CLI (MirrorService — Tier 3). Copy the lifecycle scripts and the shared
-# context shim they import, then emit a runtime tsconfig so Bun resolves the @/
-# path alias against ./dist/ rather than the source ./src/ (which never reaches
-# the runtime image). Same `bun run mirror:*` commands work in dev and the image.
-# See the api-mirror skill for the full recipe.
-COPY --from=build /usr/src/app/scripts/faa-mirror-init.ts \
-                  /usr/src/app/scripts/faa-mirror-refresh.ts \
-                  /usr/src/app/scripts/faa-mirror-verify.ts \
-                  /usr/src/app/scripts/_mirror-context.ts \
-                  ./scripts/
-RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > tsconfig.json
+# dist/cli contains the compiled mirror lifecycle commands. Their relative
+# imports share the server's compiled modules; no source or runtime tsconfig.
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.

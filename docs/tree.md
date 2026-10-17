@@ -1,6 +1,6 @@
 # faa-aircraft-registry-mcp-server - Directory Structure
 
-Generated on: 2026-10-16 14:05:19
+Generated on: 2026-10-17 22:09:14
 
 ```text
 faa-aircraft-registry-mcp-server/
@@ -116,7 +116,6 @@ faa-aircraft-registry-mcp-server/
 │   └── tool-defs-analysis/
 │       └── SKILL.md
 ├── scripts/
-│   ├── _mirror-context.ts
 │   ├── build-changelog.ts
 │   ├── build.ts
 │   ├── check-dependency-specifiers.ts
@@ -127,9 +126,6 @@ faa-aircraft-registry-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
-│   ├── faa-mirror-init.ts
-│   ├── faa-mirror-refresh.ts
-│   ├── faa-mirror-verify.ts
 │   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
@@ -138,6 +134,11 @@ faa-aircraft-registry-mcp-server/
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/
+│   ├── cli/
+│   │   ├── _mirror-context.ts
+│   │   ├── faa-mirror-init.ts
+│   │   ├── faa-mirror-refresh.ts
+│   │   └── faa-mirror-verify.ts
 │   ├── config/
 │   │   └── server-config.ts
 │   ├── mcp-server/
@@ -173,12 +174,16 @@ faa-aircraft-registry-mcp-server/
 │   │   └── server-config.test.ts
 │   ├── fixtures/
 │   │   ├── build-fixture-db.ts
-│   │   └── make-zip.ts
+│   │   ├── make-zip.ts
+│   │   └── stdio-client.ts
 │   ├── integration/
 │   │   └── tool-contracts.int.test.ts
+│   ├── package/
+│   │   └── artifacts.test.ts
 │   ├── prompts/
 │   ├── resources/
 │   ├── scripts/
+│   │   ├── mirror-cli.test.ts
 │   │   └── mirror-context.test.ts
 │   ├── services/
 │   │   ├── csv.test.ts

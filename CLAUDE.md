@@ -276,11 +276,11 @@ src/
       get-aircraft-type.tool.ts         # decode a 6–7-character mfr/model/series code
     resources/definitions/
       registration.resource.ts          # faa://registration/{nNumber} (reuses the lookup handler)
-scripts/
-  faa-mirror-init.ts                    # mirror:init — full out-of-band build
-  faa-mirror-refresh.ts                 # mirror:refresh — incremental/full rebuild
-  faa-mirror-verify.ts                  # mirror:verify — readiness + integrity check
-  _mirror-context.ts                    # shared mirror-instance shim for the three CLI scripts
+  cli/
+    faa-mirror-init.ts                  # mirror:init — full out-of-band build
+    faa-mirror-refresh.ts               # mirror:refresh — incremental/full rebuild
+    faa-mirror-verify.ts                # mirror:verify — readiness + integrity check
+    _mirror-context.ts                 # shared mirror-instance shim for the three CLI scripts
 ```
 
 ---
@@ -348,7 +348,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Commands
 
-**Runtime:** Scripts use Bun's native TypeScript execution — `bun run <cmd>` is the standard invocation. `npm run <cmd>` also works (npm delegates to bun).
+**Runtime:** Build and development scripts use Bun's native TypeScript execution. Mirror lifecycle commands run compiled `dist/cli/*.js`; build first in a checkout. `bun run mirror:*` uses Bun, while `npm run mirror:*` uses Node. Both share the same compiled registry modules.
 
 | Command | Purpose |
 |:--------|:--------|
@@ -364,7 +364,8 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
-| `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test` | Run unit and integration tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test:package` | Build and exercise the npm tarball and cleaned MCPB with real Node and Bun processes |
 | `bun run mirror:init` | Build the SQLite registry index from the FAA ZIP — full out-of-band build. Run once before first use; idempotent and resumable. Never on server startup. |
 | `bun run mirror:refresh` | Rebuild the index from the latest FAA release. The HTTP server schedules this daily; stdio operators run it out-of-band. |
 | `bun run mirror:verify` | Report index health — readiness, sync status, record count, SQLite integrity check. Exits non-zero when not ready or integrity fails. |
@@ -380,7 +381,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The cleanup step prunes dev dependencies and strips dependency-shipped agent docs plus platform-specific native bindings that root-anchored `.mcpbignore` patterns cannot reach. MCPB is stdio-only — HTTP deployments are unaffected.
+`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. Cleanup prunes dev dependencies, dependency-shipped agent docs, and optional DuckDB platform bindings. The required `better-sqlite3` production dependency retains all eight bundled N-API prebuilts (macOS, Windows, Linux glibc/musl × x64/arm64). Source and development scripts are excluded; the mirror CLI ships as `dist/cli/*.js`. MCPB is stdio-only.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

@@ -1,11 +1,11 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * @fileoverview mirror:init — full out-of-band build of the FAA registry index.
  * Downloads the Releasable Aircraft Database ZIP, parses the MASTER parts +
  * reference/status files, pre-joins, and writes the SQLite index. Idempotent and
  * resumable: re-running after an interrupt continues from the persisted state.
  * Run at Docker image build or as a one-shot job — never on server startup.
- * @module scripts/faa-mirror-init
+ * @module cli/faa-mirror-init
  */
 
 import { logger } from '@cyanheads/mcp-ts-core/utils';
