@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/faa-aircraft-registry-mcp-server",
     "source": "github"
   },
-  "version": "0.1.12",
+  "version": "0.2.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/faa-aircraft-registry-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.1.12",
+      "version": "0.2.0",
       "environmentVariables": [
         {
           "name": "FAA_REDACT_OWNER_PII",
@@ -66,7 +66,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/faa-aircraft-registry-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.1.12",
+      "version": "0.2.0",
       "environmentVariables": [
         {
           "name": "MCP_TRANSPORT_TYPE",

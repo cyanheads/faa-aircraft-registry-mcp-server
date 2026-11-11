@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-11-10 · 🛡️ Security
+
+Query complete FAA registry snapshots with the source date and an N-number's cancellation history.
+
 ## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-10-17
 
 Mirror lifecycle commands and the Node SQLite driver work from installed packages and cleaned Desktop bundles.
