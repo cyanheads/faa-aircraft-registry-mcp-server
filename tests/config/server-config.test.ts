@@ -97,3 +97,23 @@ describe('path and URL fields under env normalization', () => {
     expect(getServerConfig().mirrorPath).toBe('/var/lib/faa/registry.db');
   });
 });
+
+describe('FAA_CLAMP_LIMITS', () => {
+  it.each([undefined, '', '   ', unsubstituted('FAA_CLAMP_LIMITS'), 'true'])(
+    'enables clamping for %j',
+    (value) => {
+      vi.stubEnv('FAA_CLAMP_LIMITS', value);
+      expect(getServerConfig().clampLimits).toBe(true);
+    },
+  );
+
+  it('restores the strict ceiling with false', () => {
+    vi.stubEnv('FAA_CLAMP_LIMITS', 'false');
+    expect(getServerConfig().clampLimits).toBe(false);
+  });
+
+  it('rejects malformed values', () => {
+    vi.stubEnv('FAA_CLAMP_LIMITS', 'sometimes');
+    expect(() => getServerConfig()).toThrow(/clampLimits|FAA_CLAMP_LIMITS/);
+  });
+});

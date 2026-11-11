@@ -45,6 +45,23 @@ describe('openZipArchive', () => {
     expect(archive.readEntry('MISSING.txt')).toBeUndefined();
   });
 
+  it.each([
+    [((2024 - 1980) << 9) | (2 << 5) | 29, '2024-02-29'],
+    [((2025 - 1980) << 9) | (2 << 5) | 29, undefined],
+    [((2026 - 1980) << 9) | (13 << 5) | 9, undefined],
+    [0, undefined],
+  ])(
+    'reads calendar date %s from metadata even when the local header is corrupt',
+    (dosDate, date) => {
+      const zip = makeZip([{ name: 'nested/MASTER-1.txt', data: Buffer.from('sample'), dosDate }]);
+      zip.writeUInt32LE(0, 0);
+      const archive = openZipArchive(zip);
+      expect(archive.entryDate('master-1.txt')).toBe(date);
+      expect(archive.entryDate('missing.txt')).toBeUndefined();
+      expect(() => archive.readEntry('master-1.txt')).toThrow('invalid signature');
+    },
+  );
+
   it('exposes the stored entry names', () => {
     const archive = openZipArchive(
       makeZip([

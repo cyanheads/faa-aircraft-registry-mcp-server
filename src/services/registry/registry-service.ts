@@ -1,24 +1,17 @@
 /**
  * @fileoverview Registry service — the read path over the on-disk FAA SQLite
- * mirror. Owns query, the MASTER→ACFTREF→ENGINE join (resolved at ingest), coded-
- * field decode, and the single owner-PII redaction chokepoint. Built on the
- * framework MirrorService; the index is the source of truth at runtime, so a cold
- * (never-initialized) mirror surfaces a loud `ServiceUnavailable` rather than an
- * empty result — there is no live API to fall back to.
+ * mirror. Reads lookup, status and search results in one SQLite snapshot per
+ * request, applying manufacturer and owner redaction before results are exposed.
  * @module services/registry/registry-service
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
-import {
-  defineMirror,
-  type Mirror,
-  type QueryFilter,
-  sqliteMirrorStore,
-} from '@cyanheads/mcp-ts-core/mirror';
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import type { Mirror, SqliteHandle } from '@cyanheads/mcp-ts-core/mirror';
 import {
   decodeAircraftCategory,
   decodeAirworthinessClass,
+  decodeApprovedOperations,
   decodeBuilderCert,
   decodeFractionalOwner,
   decodeRegion,
@@ -29,30 +22,33 @@ import {
   decodeTypeReservation,
   decodeWeightClass,
 } from './decode.js';
-import { createFaaIngester } from './ingest.js';
 import {
   cleanField,
   displayNNumber,
   isValidAircraftCode,
   isValidNNumber,
-  normalizeExactFilter,
   normalizeNNumber,
-  toFtsMatch,
 } from './normalize.js';
+import { createRegistryMirror } from './registry-mirror.js';
 import {
-  AIRCRAFT_REF_FTS,
-  AIRCRAFT_REF_FTS_COLUMNS,
+  REGISTRATION_REFERENCE_JOIN,
+  readAircraftTypes,
+  readRegistrations,
+  visibleManufacturer,
+} from './registry-search.js';
+import { type RegistrySnapshot, withRegistrySnapshot } from './registry-snapshot.js';
+import {
   AIRCRAFT_REF_TABLE,
   DEREG_TABLE,
-  MAKE_MODEL_FTS_COLUMNS,
-  OWNER_FTS_COLUMNS,
+  ENGINE_REF_TABLE,
+  REGISTRATION_TABLE,
   RESERVED_TABLE,
-  registrationStoreSpec,
 } from './schema.js';
 import {
   type AircraftTypeRecord,
   type AircraftTypeSearchFilters,
   type AircraftTypeSummary,
+  type CancellationRecord,
   type CodedValue,
   compact,
   type OwnerDetail,
@@ -70,6 +66,8 @@ export interface RegistryServiceOptions {
   mirrorPath: string;
   redactOwnerPii: boolean;
 }
+
+type SnapshotObserver = (snapshot: RegistrySnapshot) => void;
 
 /** Build a `CodedValue` from a raw code + decoder, omitting absent codes. */
 function coded(
@@ -112,12 +110,7 @@ export class RegistryService {
 
   constructor(options: RegistryServiceOptions) {
     this.redactOwnerPii = options.redactOwnerPii;
-    const store = sqliteMirrorStore(registrationStoreSpec(options.mirrorPath));
-    this.mirror = defineMirror({
-      name: 'faa-registry',
-      store,
-      sync: createFaaIngester(() => store.raw(), options.databaseUrl),
-    });
+    this.mirror = createRegistryMirror(options);
   }
 
   /** Whether owner-name search is permitted (false when PII is redacted). */
@@ -130,33 +123,16 @@ export class RegistryService {
     return this.mirror;
   }
 
-  /**
-   * Assert the mirror has completed at least one full init AND currently holds
-   * records. A cold index is a hard failure — there is no live API fallback for
-   * this server.
-   *
-   * `mirror.ready()` reflects only the last sync's completion marker, which
-   * survives an interrupted rebuild: the ingester wipes the primary table before
-   * reloading it, so a crash/OOM mid-rebuild leaves an empty `registration` table
-   * while a prior run's `completedAt` still reports ready. Without the row-count
-   * gate every lookup/search/status query returns empty with `isSuccess: true`
-   * instead of the loud `ServiceUnavailable` this server promises. The durable
-   * fix — an atomic stage-and-swap in the framework MirrorService so a rebuild is
-   * never observably empty — is tracked in cyanheads/mcp-ts-core#286.
-   */
-  private async assertReady(): Promise<void> {
-    if (!(await this.mirror.ready())) {
-      throw serviceUnavailable(
-        'The FAA registry index has not been built yet. Run the mirror:init script to download and index the registry before querying.',
-        { reason: 'mirror_not_ready' },
-      );
-    }
-    if ((await this.mirror.store.count()) === 0) {
-      throw serviceUnavailable(
-        'The FAA registry index is present but empty — a rebuild was likely interrupted before it finished loading. Re-run the mirror:init (or mirror:refresh) script to rebuild the index.',
-        { reason: 'mirror_empty' },
-      );
-    }
+  private async read<T>(
+    query: (handle: SqliteHandle) => T,
+    onSnapshot: SnapshotObserver | undefined,
+  ): Promise<T> {
+    const handle = await this.mirror.raw();
+    return withRegistrySnapshot(handle, (snapshot) => {
+      const result = query(handle);
+      onSnapshot?.(snapshot);
+      return result;
+    });
   }
 
   /**
@@ -181,227 +157,157 @@ export class RegistryService {
   }
 
   /** Lookup one active registration by N-number, fully decoded and joined. */
-  async lookupRegistration(
+  lookupRegistration(
     nNumberInput: string,
     ctx: Context,
+    onSnapshot?: SnapshotObserver,
   ): Promise<RegistrationRecord | undefined> {
-    await this.assertReady();
-    const nNumber = normalizeNNumber(nNumberInput);
-    if (!isValidNNumber(nNumber)) this.failInvalidNNumber(nNumberInput);
-    ctx.log.debug('Looking up registration', { nNumber });
-    const rows = await this.mirror.getByIds([nNumber]);
-    const row = rows[0];
-    if (!row) return;
-    return this.toRegistrationRecord(row);
+    return this.read((handle) => {
+      const nNumber = normalizeNNumber(nNumberInput);
+      if (!isValidNNumber(nNumber)) this.failInvalidNNumber(nNumberInput);
+      ctx.log.debug('Looking up registration', { nNumber });
+      const row = handle
+        .prepare<Row>(
+          `SELECT r.*, ${visibleManufacturer('r.make', this.redactOwnerPii)} AS visible_make,
+                ref.mfr AS reference_make,
+                ${visibleManufacturer('ref.mfr', this.redactOwnerPii)} AS visible_reference_make,
+                engine.horsepower, engine.thrust
+           FROM ${REGISTRATION_TABLE} AS r ${REGISTRATION_REFERENCE_JOIN}
+           LEFT JOIN ${ENGINE_REF_TABLE} AS engine ON engine.code = r.eng_mfr_mdl_code
+          WHERE r.n_number = ?`,
+        )
+        .get(nNumber);
+      return row ? this.toRegistrationRecord(row) : undefined;
+    }, onSnapshot);
   }
 
   /** Decode a 6–7-character manufacturer/model/series code to aircraft specs. */
-  async getAircraftType(codeInput: string, ctx: Context): Promise<AircraftTypeRecord | undefined> {
-    await this.assertReady();
-    const code = codeInput.trim().toUpperCase();
-    if (!isValidAircraftCode(code)) this.failInvalidCode(codeInput);
-    ctx.log.debug('Looking up aircraft type', { code });
-    const handle = await this.mirror.raw();
-    const row = handle.prepare<Row>(`SELECT * FROM ${AIRCRAFT_REF_TABLE} WHERE code = ?`).get(code);
-    if (!row) return;
-    return this.toAircraftTypeRecord(row);
+  getAircraftType(
+    codeInput: string,
+    ctx: Context,
+    onSnapshot?: SnapshotObserver,
+  ): Promise<AircraftTypeRecord | undefined> {
+    return this.read((handle) => {
+      const code = codeInput.trim().toUpperCase();
+      if (!isValidAircraftCode(code)) this.failInvalidCode(codeInput);
+      ctx.log.debug('Looking up aircraft type', { code });
+      const row = handle
+        .prepare<Row>(
+          `SELECT ref.*, ${visibleManufacturer('ref.mfr', this.redactOwnerPii)} AS visible_make
+           FROM ${AIRCRAFT_REF_TABLE} AS ref WHERE ref.code = ?`,
+        )
+        .get(code);
+      return row ? this.toAircraftTypeRecord(row) : undefined;
+    }, onSnapshot);
   }
 
   /** Search active registrations by owner/make-model/state/type/Mode S code. */
-  async searchRegistrations(
+  searchRegistrations(
     filters: RegistrationSearchFilters,
     ctx: Context,
+    onSnapshot?: SnapshotObserver,
   ): Promise<SearchPage<RegistrationSummary>> {
-    await this.assertReady();
-    const structured: QueryFilter[] = [];
-    const state = normalizeExactFilter(filters.state, 'state');
-    const aircraftType = normalizeExactFilter(filters.aircraftType, 'aircraftType');
-    const modeSCode = normalizeExactFilter(filters.modeSCode, 'modeSCode');
-    const manufacturerModelCode = filters.manufacturerModelCode?.trim().toUpperCase();
-    if (manufacturerModelCode && !isValidAircraftCode(manufacturerModelCode)) {
-      this.failInvalidCode(manufacturerModelCode);
-    }
-    const matchTerms: string[] = [];
-    /**
-     * A free-text filter whose tokens all escape away (e.g. `"""`) can never
-     * match. Short-circuit to an empty page rather than dropping the term, which
-     * would silently widen the search to every row.
-     */
-    let unmatchable = false;
-    const pushMatch = (text: string, columns: readonly string[]): void => {
-      const clause = toFtsMatch(text, columns);
-      if (clause) matchTerms.push(clause);
-      else unmatchable = true;
-    };
-
-    if (filters.makeModel) pushMatch(filters.makeModel, MAKE_MODEL_FTS_COLUMNS);
-    if (filters.ownerName && this.ownerSearchEnabled)
-      pushMatch(filters.ownerName, OWNER_FTS_COLUMNS);
-    if (state) structured.push({ column: 'state', op: 'eq', value: state });
-    if (manufacturerModelCode)
-      structured.push({ column: 'mfr_mdl_code', op: 'eq', value: manufacturerModelCode });
-    if (aircraftType) {
-      structured.push({
-        column: 'aircraft_type_code',
-        op: 'eq',
-        value: aircraftType,
-      });
-    }
-    if (modeSCode) {
-      structured.push({
-        column: 'mode_s_code_hex',
-        op: 'eq',
-        value: modeSCode,
-      });
-    }
-
-    const match = matchTerms.length > 0 ? matchTerms.join(' AND ') : undefined;
-    ctx.log.debug('Searching registrations', {
-      match,
-      structured: structured.length,
-      limit: filters.limit,
-      offset: filters.offset,
-      unmatchable,
-    });
-
-    if (unmatchable) return { items: [], truncated: false, cap: filters.limit, totalCount: 0 };
-
-    const result = await this.mirror.query({
-      ...(match ? { match } : {}),
-      ...(structured.length > 0 ? { filters: structured } : {}),
-      limit: filters.limit,
-      offset: filters.offset,
-    });
-
-    const items = result.rows.map((row) => this.toRegistrationSummary(row));
-    return {
-      items,
-      truncated: filters.offset + items.length < result.total,
-      cap: filters.limit,
-      totalCount: result.total,
-    };
+    return this.read((handle) => {
+      const code = filters.manufacturerModelCode?.trim().toUpperCase();
+      if (code && !isValidAircraftCode(code)) this.failInvalidCode(code);
+      ctx.log.debug('Searching registrations', { limit: filters.limit, offset: filters.offset });
+      const page = readRegistrations(handle, filters, this.redactOwnerPii, code);
+      return { ...page, items: page.items.map((row) => this.toRegistrationSummary(row)) };
+    }, onSnapshot);
   }
 
   /** Search the aircraft reference table via its FTS index + optional filters. */
-  async searchAircraftTypes(
+  searchAircraftTypes(
     filters: AircraftTypeSearchFilters,
     ctx: Context,
+    onSnapshot?: SnapshotObserver,
   ): Promise<SearchPage<AircraftTypeSummary>> {
-    await this.assertReady();
-    const handle = await this.mirror.raw();
-    const where: string[] = [];
-    const params: (string | number)[] = [];
-    const aircraftType = normalizeExactFilter(filters.aircraftType, 'aircraftType');
-    const category = normalizeExactFilter(filters.category, 'category');
-
-    if (filters.query) {
-      const clause = toFtsMatch(filters.query, AIRCRAFT_REF_FTS_COLUMNS);
-      // A query that escapes to nothing can never match — see searchRegistrations.
-      if (!clause) return { items: [], truncated: false, cap: filters.limit, totalCount: 0 };
-      where.push(
-        `code IN (SELECT code FROM ${AIRCRAFT_REF_FTS} WHERE ${AIRCRAFT_REF_FTS} MATCH ?)`,
-      );
-      params.push(clause);
-    }
-    if (aircraftType) {
-      where.push('aircraft_type_code = ?');
-      params.push(aircraftType);
-    }
-    if (category) {
-      where.push('category_code = ?');
-      params.push(category);
-    }
-
-    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
-    ctx.log.debug('Searching aircraft types', {
-      conditions: where.length,
-      limit: filters.limit,
-      offset: filters.offset,
-    });
-
-    const countRow = handle
-      .prepare<{ n: number }>(`SELECT COUNT(*) AS n FROM ${AIRCRAFT_REF_TABLE} ${whereSql}`)
-      .get(...params);
-    const total = countRow?.n ?? 0;
-
-    // `code` (the primary key) breaks ties on mfr+model — without it the order of
-    // equal-key rows is unspecified, so paged calls could repeat or skip rows.
-    const rows = handle
-      .prepare<Row>(
-        `SELECT * FROM ${AIRCRAFT_REF_TABLE} ${whereSql} ORDER BY mfr, model, code LIMIT ? OFFSET ?`,
-      )
-      .all(...params, filters.limit, filters.offset);
-
-    const items = rows.map((row) => this.toAircraftTypeSummary(row));
-    return {
-      items,
-      truncated: filters.offset + items.length < total,
-      cap: filters.limit,
-      totalCount: total,
-    };
+    return this.read((handle) => {
+      ctx.log.debug('Searching aircraft types', { limit: filters.limit, offset: filters.offset });
+      const page = readAircraftTypes(handle, filters, this.redactOwnerPii);
+      return { ...page, items: page.items.map((row) => this.toAircraftTypeSummary(row)) };
+    }, onSnapshot);
   }
 
   /**
    * Resolve registration + airworthiness status across all three status files in
-   * priority order — active (MASTER) wins, then deregistered, then reserved.
+   * priority order — active (MASTER), reserved, then deregistered.
    * Returns a discriminated `recordType`; an unmatched number is a valid
-   * `'unknown'` answer, not an error.
+   * `'unknown'` answer. Cancellation history follows the number across assignments.
    */
-  async getRegistrationStatus(
+  getRegistrationStatus(
     nNumberInput: string,
     ctx: Context,
+    onSnapshot?: SnapshotObserver,
   ): Promise<RegistrationStatusResult> {
-    await this.assertReady();
-    const nNumber = normalizeNNumber(nNumberInput);
-    if (!isValidNNumber(nNumber)) this.failInvalidNNumber(nNumberInput);
-    const nNumberDisplay = displayNNumber(nNumber);
-    ctx.log.debug('Resolving registration status', { nNumber });
+    return this.read((handle) => {
+      const nNumber = normalizeNNumber(nNumberInput);
+      if (!isValidNNumber(nNumber)) this.failInvalidNNumber(nNumberInput);
+      ctx.log.debug('Resolving registration status', { nNumber });
+      return this.readRegistrationStatus(handle, nNumber);
+    }, onSnapshot);
+  }
 
-    const active = await this.mirror.getByIds([nNumber]);
-    if (active[0]) {
-      const row = active[0];
-      return compact<Extract<RegistrationStatusResult, { recordType: 'active' }>>({
-        recordType: 'active',
-        nNumber,
-        nNumberDisplay,
-        status: coded(str(row, 'status_code'), decodeStatusCode),
-        airworthinessClass: coded(str(row, 'airworthiness_class_code'), decodeAirworthinessClass),
-        certIssueDate: str(row, 'cert_issue_date'),
-        expirationDate: str(row, 'expiration_date'),
-        airworthinessDate: str(row, 'airworthiness_date'),
-      });
-    }
-
-    const handle = await this.mirror.raw();
-
-    const dereg = handle
+  private readRegistrationStatus(handle: SqliteHandle, nNumber: string): RegistrationStatusResult {
+    const history = handle
       .prepare<Row>(
-        `SELECT * FROM ${DEREG_TABLE} WHERE n_number = ? ORDER BY cancel_date DESC LIMIT 1`,
+        `SELECT d.cancel_date, d.serial_number, d.mfr_mdl_code, d.status_code,
+              d.export_country, d.year_mfr, d.mode_s_code_hex, ref.model,
+              ${visibleManufacturer('ref.mfr', this.redactOwnerPii)} AS visible_make
+         FROM ${DEREG_TABLE} AS d
+         LEFT JOIN ${AIRCRAFT_REF_TABLE} AS ref ON ref.code = d.mfr_mdl_code
+        WHERE d.n_number = ?
+        ORDER BY NULLIF(d.cancel_date, '') DESC, d.rowid`,
+      )
+      .all(nNumber);
+    const cancellations = history.map((row) =>
+      compact<CancellationRecord>({
+        cancelDate: str(row, 'cancel_date'),
+        serialNumber: str(row, 'serial_number'),
+        manufacturerModelCode: str(row, 'mfr_mdl_code'),
+        make: str(row, 'visible_make'),
+        model: str(row, 'model'),
+        exportCountry: str(row, 'export_country'),
+        status: coded(str(row, 'status_code'), decodeStatusCode),
+      }),
+    );
+    const current = {
+      nNumber,
+      nNumberDisplay: displayNNumber(nNumber),
+      cancellations: cancellations.length > 0 ? cancellations : undefined,
+    };
+
+    const active = handle
+      .prepare<Row>(
+        `SELECT status_code, airworthiness_class_code, cert_issue_date, expiration_date, airworthiness_date
+         FROM ${REGISTRATION_TABLE} WHERE n_number = ?`,
       )
       .get(nNumber);
-    if (dereg) {
-      return compact<Extract<RegistrationStatusResult, { recordType: 'deregistered' }>>({
-        recordType: 'deregistered',
-        nNumber,
-        nNumberDisplay,
-        status: coded(str(dereg, 'status_code'), decodeStatusCode),
-        cancelDate: str(dereg, 'cancel_date'),
-        serialNumber: str(dereg, 'serial_number'),
-        manufacturerModelCode: str(dereg, 'mfr_mdl_code'),
-        modeSCodeHex: str(dereg, 'mode_s_code_hex'),
+    if (active) {
+      return compact<Extract<RegistrationStatusResult, { recordType: 'active' }>>({
+        ...current,
+        recordType: 'active',
+        status: coded(str(active, 'status_code'), decodeStatusCode),
+        airworthinessClass: coded(
+          str(active, 'airworthiness_class_code'),
+          decodeAirworthinessClass,
+        ),
+        certIssueDate: str(active, 'cert_issue_date'),
+        expirationDate: str(active, 'expiration_date'),
+        airworthinessDate: str(active, 'airworthiness_date'),
       });
     }
 
     const reserved = handle
       .prepare<Row>(
-        `SELECT * FROM ${RESERVED_TABLE} WHERE n_number = ? ORDER BY reserve_date DESC LIMIT 1`,
+        `SELECT type_reservation_code, reserve_date, expiration_notice_date, purge_date, n_number_for_change
+         FROM ${RESERVED_TABLE} WHERE n_number = ? ORDER BY reserve_date DESC, rowid LIMIT 1`,
       )
       .get(nNumber);
     if (reserved) {
       return compact<Extract<RegistrationStatusResult, { recordType: 'reserved' }>>({
+        ...current,
         recordType: 'reserved',
-        nNumber,
-        nNumberDisplay,
         typeReservation: coded(str(reserved, 'type_reservation_code'), decodeTypeReservation),
         reserveDate: str(reserved, 'reserve_date'),
         expirationNoticeDate: str(reserved, 'expiration_notice_date'),
@@ -410,15 +316,37 @@ export class RegistryService {
       });
     }
 
-    return { recordType: 'unknown', nNumber, nNumberDisplay };
+    const latest = history[0];
+    if (latest) {
+      return compact<Extract<RegistrationStatusResult, { recordType: 'deregistered' }>>({
+        ...current,
+        ...cancellations[0],
+        recordType: 'deregistered',
+        modeSCodeHex: str(latest, 'mode_s_code_hex'),
+        yearManufactured: numZeroAsBlank(latest, 'year_mfr'),
+      });
+    }
+
+    return { recordType: 'unknown', nNumber, nNumberDisplay: current.nNumberDisplay };
   }
 
-  // --- Row → domain mappers (decode + redaction applied here) ---
+  // --- Row → domain mappers ---
 
   /** Map a `registration` row to a full decoded record, redacting owner PII. */
   private toRegistrationRecord(row: Row): RegistrationRecord {
     const nNumber = String(row.n_number);
-    const record = compact<RegistrationRecord>({
+    const make = str(row, 'visible_make');
+    const kitManufacturer = str(row, 'kit_mfr');
+    const kitName = kitManufacturer?.toUpperCase();
+    const hiddenKit =
+      this.redactOwnerPii &&
+      kitName !== undefined &&
+      ((!str(row, 'visible_reference_make') &&
+        kitName === str(row, 'reference_make')?.toUpperCase()) ||
+        (!make && kitName === str(row, 'make')?.toUpperCase()));
+    const classCode = str(row, 'airworthiness_class_code');
+    const rawOperations = row.approved_operations_raw;
+    return compact<RegistrationRecord>({
       nNumber,
       nNumberDisplay: displayNNumber(nNumber),
       ownerRedacted: this.redactOwnerPii,
@@ -426,17 +354,23 @@ export class RegistryService {
       serialNumber: str(row, 'serial_number'),
       manufacturerModelCode: str(row, 'mfr_mdl_code'),
       engineManufacturerModelCode: str(row, 'eng_mfr_mdl_code'),
-      make: str(row, 'make'),
+      make,
       model: str(row, 'model'),
       aircraftType: coded(str(row, 'aircraft_type_code'), decodeTypeAircraft),
       engineType: coded(str(row, 'engine_type_code'), decodeTypeEngine),
       engineMake: str(row, 'engine_make'),
       engineModel: str(row, 'engine_model'),
+      engineHorsepower: numZeroAsBlank(row, 'horsepower'),
+      engineThrustLbs: numZeroAsBlank(row, 'thrust'),
       yearManufactured: numZeroAsBlank(row, 'year_mfr'),
       region: coded(str(row, 'region_code'), decodeRegion),
       lastActionDate: str(row, 'last_action_date'),
       certIssueDate: str(row, 'cert_issue_date'),
-      airworthinessClass: coded(str(row, 'airworthiness_class_code'), decodeAirworthinessClass),
+      airworthinessClass: coded(classCode, decodeAirworthinessClass),
+      approvedOperations: decodeApprovedOperations(
+        classCode,
+        typeof rawOperations === 'string' ? rawOperations : undefined,
+      ),
       approvedOperationsRaw: str(row, 'approved_operations_raw'),
       status: coded(str(row, 'status_code'), decodeStatusCode),
       airworthinessDate: str(row, 'airworthiness_date'),
@@ -444,11 +378,10 @@ export class RegistryService {
       modeSCodeOctal: str(row, 'mode_s_code_octal'),
       modeSCodeHex: str(row, 'mode_s_code_hex'),
       uniqueId: str(row, 'unique_id'),
-      kitManufacturer: str(row, 'kit_mfr'),
+      kitManufacturer: hiddenKit ? undefined : kitManufacturer,
       kitModel: str(row, 'kit_model'),
       owner: this.redactOwnerPii ? undefined : this.buildOwnerDetail(row),
     });
-    return record;
   }
 
   /** Build the owner block from a registration row (PII — caller gates this). */
@@ -487,7 +420,7 @@ export class RegistryService {
       nNumber,
       nNumberDisplay: displayNNumber(nNumber),
       ownerRedacted: this.redactOwnerPii,
-      make: str(row, 'make'),
+      make: str(row, 'visible_make'),
       manufacturerModelCode: str(row, 'mfr_mdl_code'),
       model: str(row, 'model'),
       yearManufactured: numZeroAsBlank(row, 'year_mfr'),
@@ -495,6 +428,7 @@ export class RegistryService {
       aircraftType: coded(str(row, 'aircraft_type_code'), decodeTypeAircraft),
       status: coded(str(row, 'status_code'), decodeStatusCode),
       modeSCodeHex: str(row, 'mode_s_code_hex'),
+      serialNumber: str(row, 'serial_number'),
       ownerName: this.redactOwnerPii ? undefined : str(row, 'owner_name'),
     });
   }
@@ -503,7 +437,7 @@ export class RegistryService {
   private toAircraftTypeRecord(row: Row): AircraftTypeRecord {
     return compact<AircraftTypeRecord>({
       code: String(row.code),
-      manufacturer: str(row, 'mfr'),
+      manufacturer: str(row, 'visible_make'),
       model: str(row, 'model'),
       aircraftType: coded(str(row, 'aircraft_type_code'), decodeTypeAircraft),
       engineType: coded(str(row, 'engine_type_code'), decodeTypeEngine),
@@ -524,7 +458,7 @@ export class RegistryService {
   private toAircraftTypeSummary(row: Row): AircraftTypeSummary {
     return compact<AircraftTypeSummary>({
       code: String(row.code),
-      manufacturer: str(row, 'mfr'),
+      manufacturer: str(row, 'visible_make'),
       model: str(row, 'model'),
       aircraftType: coded(str(row, 'aircraft_type_code'), decodeTypeAircraft),
       category: coded(str(row, 'category_code'), decodeAircraftCategory),

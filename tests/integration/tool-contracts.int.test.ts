@@ -9,7 +9,7 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { registrationResource } from '@/mcp-server/resources/definitions/registration.resource.js';
 import { formatRegistrationRecord } from '@/mcp-server/tools/definitions/_schemas.js';
 import { getAircraftTypeTool } from '@/mcp-server/tools/definitions/get-aircraft-type.tool.js';
@@ -25,6 +25,14 @@ import {
 } from '@/services/registry/registry-service.js';
 import { buildFixtureDb, tempDbPath } from '../fixtures/build-fixture-db.js';
 
+const snapshotCalls = [
+  [lookupRegistrationTool, { nNumber: 'N12345' }],
+  [getRegistrationStatusTool, { nNumber: 'N99999' }],
+  [getAircraftTypeTool, { code: '2072714' }],
+  [searchRegistrationsTool, { state: 'WA', limit: 1 }],
+  [searchAircraftTypesTool, { query: 'cessna', limit: 500, offset: 500 }],
+] as const;
+
 beforeAll(async () => {
   const mirrorPath = tempDbPath();
   await buildFixtureDb(mirrorPath);
@@ -38,6 +46,299 @@ beforeAll(async () => {
 afterAll(async () => {
   await getRegistryService().mirrorInstance.close();
   resetRegistryService();
+});
+
+describe.each([
+  { definition: searchRegistrationsTool, filter: { state: 'WA' } },
+  { definition: searchAircraftTypesTool, filter: { query: 'cessna' } },
+])('$definition.name limit contract', ({ definition, filter }) => {
+  it('keeps the repair of a positive integer string', async () => {
+    // Simulate a string sent by an MCP client before argument repair.
+    const result = await runToolContract(definition, {
+      ...filter,
+      limit: '25' as unknown as number,
+    });
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ totalCount: expect.any(Number) });
+  });
+
+  it('advertises a positive integer without a maximum', () => {
+    const schema = z.toJSONSchema(definition.input, { io: 'input' });
+    expect(schema.properties?.limit).toMatchObject({ type: 'integer', minimum: 1, default: 25 });
+    expect(schema.properties?.limit).not.toHaveProperty('maximum');
+  });
+
+  it.each([0, -1, 1.5, '1.5', 'abc'])('rejects invalid limit %j', async (limit) => {
+    const result = await runToolContract(definition, {
+      ...filter,
+      limit: limit as unknown as number,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_arguments' } },
+    });
+    expect(JSON.stringify(result.content)).toContain('invalid_arguments');
+  });
+
+  it.each([0, 500])('discloses the applied cap on a page at offset %i', async (offset) => {
+    const result = await runToolContract(definition, { ...filter, limit: 500, offset });
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    const { notice } = z.object({ notice: z.string() }).parse(result.structuredContent);
+    expect(notice).toEqual(expect.stringContaining('Requested limit 500; applied 200.'));
+    expect(result.structuredContent).not.toHaveProperty('nextOffset');
+    if (offset) expect(notice).toEqual(expect.stringContaining('past the end'));
+    expect(JSON.stringify(result.content)).toContain(notice);
+  });
+});
+
+it('retains cap, total and next offsets through both searches when a clamped page fills', async () => {
+  const handle = await getRegistryService().mirrorInstance.raw();
+  handle.exec(`
+    WITH RECURSIVE items(n) AS (VALUES (1) UNION ALL SELECT n+1 FROM items WHERE n<201)
+    INSERT INTO registration (n_number, state) SELECT printf('6%04d', n), 'CA' FROM items;
+    WITH RECURSIVE items(n) AS (VALUES (1) UNION ALL SELECT n+1 FROM items WHERE n<201)
+    INSERT INTO aircraft_ref (code, mfr, model, category_code, manufacturer_redacted)
+      SELECT printf('8%06d', n), 'FIXTURE', 'MODEL', '3', 0 FROM items;
+  `);
+  try {
+    for (const [definition, filter, key] of [
+      [searchRegistrationsTool, { state: 'CA' }, 'registrations'],
+      [searchAircraftTypesTool, { category: '3' }, 'aircraftTypes'],
+    ] as const) {
+      const first = await runToolContract(definition, { ...filter, limit: 500 });
+      expect(first.structuredContent).toMatchObject({
+        totalCount: 201,
+        nextOffset: 200,
+        shown: 200,
+        cap: 200,
+        truncated: true,
+        notice: expect.stringContaining('offset: 200'),
+      });
+      expect(JSON.stringify(first.content)).toContain('Requested limit 500; applied 200.');
+      expect(JSON.stringify(first.content)).toContain('offset: 200');
+      const page = z.record(z.string(), z.unknown()).parse(first.structuredContent);
+      expect(page[key]).toHaveLength(200);
+      const last = await runToolContract(definition, { ...filter, limit: 500, offset: 200 });
+      const lastPage = z.record(z.string(), z.unknown()).parse(last.structuredContent);
+      expect(lastPage[key]).toHaveLength(1);
+      expect(lastPage.totalCount).toBe(201);
+      expect(lastPage).not.toHaveProperty('nextOffset');
+      expect(lastPage).not.toHaveProperty('truncated');
+    }
+  } finally {
+    handle.exec("DELETE FROM registration WHERE state = 'CA'");
+    handle.exec("DELETE FROM aircraft_ref WHERE mfr = 'FIXTURE'");
+  }
+});
+
+describe('snapshot metadata', () => {
+  it.each([
+    ['2026-11-10', false],
+    ['2026-11-03', false],
+    ['2026-11-02', true],
+    [null, true],
+  ] as const)('reports the date and composes notices for %s', async (date, refresh) => {
+    const handle = await getRegistryService().mirrorInstance.raw();
+    handle
+      .prepare(
+        "INSERT INTO registry_generation (id, owner, generation, loading, data_as_of) VALUES (1, 'test', 0, 0, ?)",
+      )
+      .run(date);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-10T23:59:59Z'));
+    try {
+      for (const [definition, input] of snapshotCalls) {
+        const result = await runToolContract(definition, input);
+        expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+        const text = result.content
+          .map((part) => (part.type === 'text' ? part.text : ''))
+          .join('\n');
+        const output = z
+          .object({
+            dataAsOf: z.string().optional(),
+            notice: z.string().optional(),
+          })
+          .parse(result.structuredContent);
+        if (date) {
+          expect(output.dataAsOf).toBe(date);
+          expect(text).toContain(date);
+        } else {
+          expect(result.structuredContent).not.toHaveProperty('dataAsOf');
+        }
+        expect(text.includes('mirror:refresh')).toBe(refresh);
+        const { notice } = output;
+        if (notice) expect(text).toContain(notice);
+        if (definition.name === 'faa_search_registrations') {
+          expect(notice).toEqual(expect.stringContaining('offset: 1'));
+        }
+        if (definition.name === 'faa_search_aircraft_types') {
+          expect(notice).toEqual(expect.stringContaining('past the end'));
+          expect(notice).toEqual(expect.stringContaining('Requested limit 500; applied 200.'));
+        }
+      }
+    } finally {
+      vi.useRealTimers();
+      handle.exec('DELETE FROM registry_generation');
+    }
+  });
+
+  it('returns retryable loading errors through every tool and the registration resource', async () => {
+    const handle = await getRegistryService().mirrorInstance.raw();
+    handle.exec(
+      "INSERT INTO registry_generation (id, owner, generation, loading) VALUES (1, 'test', 0, 1)",
+    );
+    try {
+      for (const [definition, input] of snapshotCalls) {
+        const result = await runToolContract(definition, input);
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ServiceUnavailable,
+            data: {
+              reason: 'mirror_loading',
+              retryable: true,
+              recovery: { hint: expect.stringContaining('mirror:refresh') },
+            },
+          },
+        });
+        expect(JSON.stringify(result.content)).toContain('mirror_loading');
+        expect(JSON.stringify(result.content)).toContain('retryable');
+      }
+      expect(registrationResource.errors).toContainEqual(
+        expect.objectContaining({
+          reason: 'mirror_loading',
+          retryable: true,
+        }),
+      );
+      await expect(
+        registrationResource.handler(
+          { nNumber: 'N12345' },
+          createMockContext({ errors: registrationResource.errors }),
+        ),
+      ).rejects.toMatchObject({ data: { reason: 'mirror_loading' } });
+    } finally {
+      handle.exec('DELETE FROM registry_generation');
+    }
+  });
+});
+
+it('includes existing operations and positive engine ratings on lookup and in the resource', async () => {
+  const handle = await getRegistryService().mirrorInstance.raw();
+  handle.exec("UPDATE engine_ref SET thrust = 1250 WHERE code = '41514'");
+  try {
+    const input = { nNumber: 'N12345' };
+    const result = await runToolContract(lookupRegistrationTool, input);
+    const expected = {
+      approvedOperationsRaw: 'NAGT',
+      approvedOperations: expect.arrayContaining([{ code: 'N', label: 'Normal' }]),
+      engineHorsepower: 180,
+      engineThrustLbs: 1250,
+    };
+    expect(result.structuredContent).toMatchObject(expected);
+    const content = JSON.stringify(result.content);
+    for (const rendered of ['Normal (N)', '180 hp', '1250 lb']) expect(content).toContain(rendered);
+    const resource = await registrationResource.handler(
+      input,
+      createMockContext({ errors: registrationResource.errors }),
+    );
+    expect(registrationResource.output?.parse(resource)).toMatchObject(expected);
+    expect(resource).not.toHaveProperty('dataAsOf');
+  } finally {
+    handle.exec("UPDATE engine_ref SET thrust = NULL WHERE code = '41514'");
+  }
+});
+
+it('finds a serial by itself and retains its exact stored form on both surfaces', async () => {
+  const result = await runToolContract(searchRegistrationsTool, { serialNumber: ' 172s0001 ' });
+  expect(result.structuredContent).toMatchObject({
+    totalCount: 1,
+    registrations: [{ nNumber: '12345', serialNumber: '172S0001' }],
+  });
+  expect(JSON.stringify(result.content)).toContain('Serial: 172S0001');
+  const prefix = await runToolContract(searchRegistrationsTool, { serialNumber: '172S' });
+  expect(prefix.structuredContent).toMatchObject({ totalCount: 0, registrations: [] });
+});
+
+it('renders the latest DEREG fields and every ordered cancellation row', async () => {
+  const handle = await getRegistryService().mirrorInstance.raw();
+  handle.exec("UPDATE dereg SET export_country = 'CA', year_mfr = 2001 WHERE n_number = '404ER'");
+  handle.exec(
+    "INSERT INTO dereg (n_number, serial_number, cancel_date) VALUES ('404ER', 'OLDER-SERIAL', '2010-03-04')",
+  );
+  try {
+    const result = await runToolContract(getRegistrationStatusTool, { nNumber: '404ER' });
+    expect(result.structuredContent).toMatchObject({
+      recordType: 'deregistered',
+      exportCountry: 'CA',
+      yearManufactured: 2001,
+      make: 'CESSNA',
+      model: '172S',
+      cancellations: [
+        { exportCountry: 'CA', serialNumber: 'DEREG-SN', cancelDate: '2020-06-15' },
+        { serialNumber: 'OLDER-SERIAL', cancelDate: '2010-03-04' },
+      ],
+    });
+    const content = JSON.stringify(result.content);
+    for (const rendered of ['OLDER-SERIAL', '2010-03-04', '2001', 'CA', 'CESSNA', '172S']) {
+      expect(content).toContain(rendered);
+    }
+    expect(content.indexOf('DEREG-SN')).toBeLessThan(content.indexOf('OLDER-SERIAL'));
+  } finally {
+    handle.exec("DELETE FROM dereg WHERE serial_number = 'OLDER-SERIAL'");
+    handle.exec("UPDATE dereg SET export_country = NULL, year_mfr = NULL WHERE n_number = '404ER'");
+  }
+});
+
+it('keeps public model prefixes discoverable and withholds classified manufacturers on every surface', async () => {
+  const handle = await getRegistryService().mirrorInstance.raw();
+  handle.exec(`
+    UPDATE aircraft_ref SET manufacturer_redacted = 1, mfr = 'EXAMPLE PRIVATE MAKER'
+      WHERE code = '2072714';
+    UPDATE aircraft_ref_fts SET mfr = 'EXAMPLE PRIVATE MAKER' WHERE code = '2072714';
+    UPDATE registration SET make = 'EXAMPLE PRIVATE MAKER', kit_mfr = 'EXAMPLE PRIVATE MAKER'
+      WHERE n_number = '12345';
+  `);
+  try {
+    for (const [definition, input, field] of [
+      [lookupRegistrationTool, { nNumber: '12345' }, 'make'],
+      [getAircraftTypeTool, { code: '2072714' }, 'manufacturer'],
+      [getRegistrationStatusTool, { nNumber: '404ER' }, 'make'],
+    ] as const) {
+      const result = await runToolContract(definition, input);
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).not.toHaveProperty(field);
+      expect(JSON.stringify(result.structuredContent)).not.toContain('EXAMPLE PRIVATE MAKER');
+      expect(JSON.stringify(result.content)).not.toContain('EXAMPLE PRIVATE MAKER');
+      if (definition === lookupRegistrationTool) {
+        expect(result.structuredContent).not.toHaveProperty('kitManufacturer');
+      }
+    }
+    for (const [definition, filterKey, key, exact] of [
+      [searchRegistrationsTool, 'makeModel', 'registrations', { manufacturerModelCode: '2072714' }],
+      [searchAircraftTypesTool, 'query', 'aircraftTypes', {}],
+    ] as const) {
+      const hidden = await runToolContract(definition, { [filterKey]: 'example 172', ...exact });
+      expect(hidden.structuredContent).toMatchObject({ totalCount: 0, [key]: [] });
+      const visible = await runToolContract(definition, { [filterKey]: '172', ...exact });
+      expect(visible.isError).not.toBe(true);
+      expect(JSON.stringify(visible.structuredContent)).toContain('2072714');
+      expect(JSON.stringify(visible.content)).toContain('172S');
+      expect(JSON.stringify(visible.structuredContent)).not.toContain('EXAMPLE PRIVATE MAKER');
+      expect(JSON.stringify(visible.content)).not.toContain('EXAMPLE PRIVATE MAKER');
+    }
+    const resource = await registrationResource.handler(
+      { nNumber: '12345' },
+      createMockContext({ errors: registrationResource.errors }),
+    );
+    expect(registrationResource.output?.parse(resource)).toMatchObject({ model: '172S' });
+    expect(JSON.stringify(resource)).not.toContain('EXAMPLE PRIVATE MAKER');
+  } finally {
+    handle.exec(`
+      UPDATE aircraft_ref SET manufacturer_redacted = 0, mfr = 'CESSNA' WHERE code = '2072714';
+      UPDATE aircraft_ref_fts SET mfr = 'CESSNA' WHERE code = '2072714';
+      UPDATE registration SET make = 'CESSNA', kit_mfr = NULL WHERE n_number = '12345';
+    `);
+  }
 });
 
 toolContractSuite(lookupRegistrationTool, {
@@ -171,11 +472,13 @@ describe('error envelope on the wire', () => {
       expect(result.isError).not.toBe(true);
       expect(result.structuredContent).toMatchObject({
         code: '056387',
-        manufacturer: 'DOGGETT JOHN ROY',
         model: 'JRD VP-II',
       });
+      // This legacy reference has no certification/classification evidence.
+      expect(result.structuredContent).not.toHaveProperty('manufacturer');
       expect(JSON.stringify(result.content)).toContain('056387');
       expect(JSON.stringify(result.content)).toContain('JRD VP-II');
+      expect(JSON.stringify(result.content)).not.toContain('DOGGETT JOHN ROY');
     } finally {
       handle.prepare('DELETE FROM aircraft_ref WHERE code = ?').run('056387');
     }

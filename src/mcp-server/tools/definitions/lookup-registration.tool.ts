@@ -11,6 +11,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getRegistryService } from '@/services/registry/registry-service.js';
+import { mirrorLoadingError } from '../../_mirror-errors.js';
+import { enrichSnapshot, snapshotEnrichment } from './_response-metadata.js';
 import { formatRegistrationRecord, registrationRecordSchema } from './_schemas.js';
 
 export const lookupRegistrationTool = tool('faa_lookup_registration', {
@@ -30,7 +32,10 @@ export const lookupRegistrationTool = tool('faa_lookup_registration', {
 
   output: registrationRecordSchema,
 
+  enrichment: snapshotEnrichment,
+
   errors: [
+    mirrorLoadingError,
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
@@ -51,10 +56,14 @@ export const lookupRegistrationTool = tool('faa_lookup_registration', {
 
   async handler(input, ctx) {
     const service = getRegistryService();
-    const record = await service.lookupRegistration(input.nNumber, ctx);
+    let dataAsOf: string | undefined;
+    const record = await service.lookupRegistration(input.nNumber, ctx, (snapshot) => {
+      dataAsOf = snapshot.dataAsOf;
+    });
     if (!record) {
       throw ctx.fail('not_found', `No active registration for N-number "${input.nNumber}".`);
     }
+    enrichSnapshot(ctx, dataAsOf);
     return record;
   },
 

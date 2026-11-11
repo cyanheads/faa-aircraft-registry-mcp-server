@@ -32,6 +32,7 @@ const DEFAULT_INFLATE_CHUNK = 16 * 1024;
 interface CentralEntry {
   compressedSize: number;
   compressionMethod: number;
+  dosDate: number;
   localHeaderOffset: number;
   name: string;
   uncompressedSize: number;
@@ -43,6 +44,8 @@ interface CentralEntry {
  * so at most one decompressed entry is resident at a time.
  */
 export interface ZipArchive {
+  /** Calendar date from the central directory, without reading the entry body. */
+  entryDate(baseName: string): string | undefined;
   /** Stored entry names, in central-directory order (diagnostics/tests). */
   readonly entryNames: readonly string[];
   /**
@@ -52,6 +55,17 @@ export interface ZipArchive {
    * buffer is freed as soon as the caller drops it.
    */
   readEntry(baseName: string): Buffer | undefined;
+}
+
+/** Decode a DOS date without depending on the process time zone. */
+function calendarDate(dosDate: number): string | undefined {
+  const year = 1980 + (dosDate >> 9);
+  const month = (dosDate >> 5) & 15;
+  const day = dosDate & 31;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCDate() !== day) return;
+  return date.toISOString().slice(0, 10);
 }
 
 /**
@@ -128,6 +142,7 @@ export function openZipArchive(buf: Buffer): ZipArchive {
     directory.push({
       name,
       compressionMethod,
+      dosDate: buf.readUInt16LE(cursor + 14),
       compressedSize,
       uncompressedSize,
       localHeaderOffset,
@@ -135,13 +150,20 @@ export function openZipArchive(buf: Buffer): ZipArchive {
     cursor += 46 + fileNameLength + extraFieldLength + commentLength;
   }
 
+  function findEntry(baseName: string): CentralEntry | undefined {
+    const target = baseName.toLowerCase();
+    return directory.find(
+      (entry) => entry.name.slice(entry.name.lastIndexOf('/') + 1).toLowerCase() === target,
+    );
+  }
   return {
     entryNames: directory.map((e) => e.name),
-    readEntry(baseName: string): Buffer | undefined {
-      const target = baseName.toLowerCase();
-      const entry = directory.find(
-        (e) => (e.name.split('/').pop()?.toLowerCase() ?? '') === target,
-      );
+    entryDate(baseName) {
+      const entry = findEntry(baseName);
+      return entry ? calendarDate(entry.dosDate) : undefined;
+    },
+    readEntry(baseName) {
+      const entry = findEntry(baseName);
       return entry ? inflateEntry(buf, entry) : undefined;
     },
   };

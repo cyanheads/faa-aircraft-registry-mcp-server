@@ -12,7 +12,7 @@
 import type { Mirror } from '@cyanheads/mcp-ts-core/mirror';
 import { logger } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { initRegistryService } from '@/services/registry/registry-service.js';
+import { createRegistryMirror } from '@/services/registry/registry-mirror.js';
 
 /**
  * Initialize the framework logger for a standalone CLI run. The lifecycle scripts
@@ -25,13 +25,11 @@ export async function initCliLogging(): Promise<void> {
   await logger.initialize();
 }
 
-/** Build the registry service from env config and return its mirror instance. */
+/** Open the same mirror used by the registry service, without starting MCP. */
 export function getMirror(): Mirror {
   const config = getServerConfig();
-  const service = initRegistryService({
-    redactOwnerPii: config.redactOwnerPii,
+  return createRegistryMirror({
     mirrorPath: config.mirrorPath,
     databaseUrl: config.databaseUrl,
   });
-  return service.mirrorInstance;
 }

@@ -9,6 +9,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 
 /** A coded field shown as both raw code and decoded label. */
 export const codedValueSchema = z
@@ -69,6 +70,8 @@ export const registrationRecordSchema = z.object({
     .describe('Engine type (e.g. Reciprocating, Turbo-fan) as code + label.'),
   engineMake: z.string().optional().describe('Engine manufacturer name.'),
   engineModel: z.string().optional().describe('Engine model name.'),
+  engineHorsepower: z.number().positive().optional().describe('Rated horsepower per engine.'),
+  engineThrustLbs: z.number().positive().optional().describe('Rated thrust per engine in pounds.'),
   yearManufactured: z
     .number()
     .optional()
@@ -90,6 +93,10 @@ export const registrationRecordSchema = z.object({
     .describe(
       'Raw FAA approved-operations sub-code string; interpretation varies by airworthiness class.',
     ),
+  approvedOperations: z
+    .array(codedValueSchema)
+    .optional()
+    .describe('Approved operation codes and class-specific labels in FAA record order.'),
   status: codedValueSchema
     .optional()
     .describe('Registration status (e.g. Valid registration) as code + label.'),
@@ -128,8 +135,8 @@ export type CodedValueOutput = { code: string; label?: string | undefined };
 export function renderCoded(label: string, value?: CodedValueOutput): string | undefined {
   if (!value) return;
   return value.label
-    ? `**${label}:** ${value.label} (${value.code})`
-    : `**${label}:** ${value.code}`;
+    ? `**${label}:** ${escapeMarkdownInline(value.label)} (${escapeMarkdownInline(value.code)})`
+    : `**${label}:** ${escapeMarkdownInline(value.code)}`;
 }
 
 /**
@@ -140,11 +147,13 @@ export function renderCoded(label: string, value?: CodedValueOutput): string | u
  * independent of the redaction flag (which is surfaced by its own key name).
  */
 export function formatRegistrationRecord(r: RegistrationRecordOutput): string {
-  const lines: string[] = [`## ${r.nNumberDisplay}  (N-number: ${r.nNumber})`];
+  const lines: string[] = [
+    `## ${escapeMarkdownInline(r.nNumberDisplay)}  (N-number: ${escapeMarkdownInline(r.nNumber)})`,
+  ];
 
   const makeModel = [r.make, r.model].filter(Boolean).join(' ');
   const headline = [r.yearManufactured?.toString(), makeModel].filter(Boolean).join(' ');
-  if (headline) lines.push(`**Aircraft:** ${headline}`);
+  if (headline) lines.push(`**Aircraft:** ${escapeMarkdownInline(headline)}`);
 
   const push = (line?: string) => {
     if (line) lines.push(line);
@@ -152,27 +161,39 @@ export function formatRegistrationRecord(r: RegistrationRecordOutput): string {
 
   push(renderCoded('Aircraft type', r.aircraftType));
   if (r.engineMake || r.engineModel) {
-    push(`**Engine:** ${[r.engineMake, r.engineModel].filter(Boolean).join(' ')}`);
+    push(
+      `**Engine:** ${escapeMarkdownInline([r.engineMake, r.engineModel].filter(Boolean).join(' '))}`,
+    );
   }
   push(renderCoded('Engine type', r.engineType));
+  if (r.engineHorsepower !== undefined) push(`**Engine horsepower:** ${r.engineHorsepower} hp`);
+  if (r.engineThrustLbs !== undefined) push(`**Engine thrust:** ${r.engineThrustLbs} lb`);
   push(renderCoded('Status', r.status));
   push(renderCoded('Airworthiness class', r.airworthinessClass));
-  if (r.approvedOperationsRaw) push(`**Approved operations (raw):** ${r.approvedOperationsRaw}`);
+  if (r.approvedOperationsRaw)
+    push(`**Approved operations (raw):** ${escapeMarkdownInline(r.approvedOperationsRaw)}`);
+  for (const operation of r.approvedOperations ?? [])
+    push(renderCoded('Approved operation', operation));
   push(renderCoded('Region', r.region));
-  if (r.serialNumber) push(`**Serial number:** ${r.serialNumber}`);
-  if (r.manufacturerModelCode) push(`**Mfr/model code:** ${r.manufacturerModelCode}`);
+  if (r.serialNumber) push(`**Serial number:** ${escapeMarkdownInline(r.serialNumber)}`);
+  if (r.manufacturerModelCode)
+    push(`**Mfr/model code:** ${escapeMarkdownInline(r.manufacturerModelCode)}`);
   if (r.engineManufacturerModelCode)
-    push(`**Engine mfr/model code:** ${r.engineManufacturerModelCode}`);
-  if (r.modeSCodeHex) push(`**Mode S (hex / ICAO 24-bit):** ${r.modeSCodeHex}`);
-  if (r.modeSCodeOctal) push(`**Mode S (octal):** ${r.modeSCodeOctal}`);
+    push(`**Engine mfr/model code:** ${escapeMarkdownInline(r.engineManufacturerModelCode)}`);
+  if (r.modeSCodeHex)
+    push(`**Mode S (hex / ICAO 24-bit):** ${escapeMarkdownInline(r.modeSCodeHex)}`);
+  if (r.modeSCodeOctal) push(`**Mode S (octal):** ${escapeMarkdownInline(r.modeSCodeOctal)}`);
   push(`**Fractional ownership (fractionalOwner):** ${r.fractionalOwner ? 'Yes' : 'No'}`);
-  if (r.certIssueDate) push(`**Certificate issued:** ${r.certIssueDate}`);
-  if (r.airworthinessDate) push(`**Airworthiness date:** ${r.airworthinessDate}`);
-  if (r.expirationDate) push(`**Expires:** ${r.expirationDate}`);
-  if (r.lastActionDate) push(`**Last action:** ${r.lastActionDate}`);
-  if (r.uniqueId) push(`**Unique ID:** ${r.uniqueId}`);
+  if (r.certIssueDate) push(`**Certificate issued:** ${escapeMarkdownInline(r.certIssueDate)}`);
+  if (r.airworthinessDate)
+    push(`**Airworthiness date:** ${escapeMarkdownInline(r.airworthinessDate)}`);
+  if (r.expirationDate) push(`**Expires:** ${escapeMarkdownInline(r.expirationDate)}`);
+  if (r.lastActionDate) push(`**Last action:** ${escapeMarkdownInline(r.lastActionDate)}`);
+  if (r.uniqueId) push(`**Unique ID:** ${escapeMarkdownInline(r.uniqueId)}`);
   if (r.kitManufacturer || r.kitModel) {
-    push(`**Kit:** ${[r.kitManufacturer, r.kitModel].filter(Boolean).join(' ')}`);
+    push(
+      `**Kit:** ${escapeMarkdownInline([r.kitManufacturer, r.kitModel].filter(Boolean).join(' '))}`,
+    );
   }
 
   push(
@@ -183,16 +204,17 @@ export function formatRegistrationRecord(r: RegistrationRecordOutput): string {
   if (r.owner) {
     const o = r.owner;
     push('### Registrant');
-    if (o.name) push(`**Name:** ${o.name}`);
+    if (o.name) push(`**Name:** ${escapeMarkdownInline(o.name)}`);
     push(renderCoded('Registrant type', o.typeRegistrant));
-    if (o.street) push(`**Street:** ${o.street}`);
-    if (o.street2) push(`**Street 2:** ${o.street2}`);
-    if (o.city) push(`**City:** ${o.city}`);
-    if (o.state) push(`**State:** ${o.state}`);
-    if (o.zip) push(`**ZIP:** ${o.zip}`);
-    if (o.county) push(`**County:** ${o.county}`);
-    if (o.country) push(`**Country:** ${o.country}`);
-    if (o.otherNames && o.otherNames.length > 0) push(`**Co-owners:** ${o.otherNames.join('; ')}`);
+    if (o.street) push(`**Street:** ${escapeMarkdownInline(o.street)}`);
+    if (o.street2) push(`**Street 2:** ${escapeMarkdownInline(o.street2)}`);
+    if (o.city) push(`**City:** ${escapeMarkdownInline(o.city)}`);
+    if (o.state) push(`**State:** ${escapeMarkdownInline(o.state)}`);
+    if (o.zip) push(`**ZIP:** ${escapeMarkdownInline(o.zip)}`);
+    if (o.county) push(`**County:** ${escapeMarkdownInline(o.county)}`);
+    if (o.country) push(`**Country:** ${escapeMarkdownInline(o.country)}`);
+    if (o.otherNames && o.otherNames.length > 0)
+      push(`**Co-owners:** ${escapeMarkdownInline(o.otherNames.join('; '))}`);
   }
 
   return lines.join('\n');

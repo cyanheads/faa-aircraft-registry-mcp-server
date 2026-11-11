@@ -2,8 +2,8 @@
 /**
  * @fileoverview mirror:init — full out-of-band build of the FAA registry index.
  * Downloads the Releasable Aircraft Database ZIP, parses the MASTER parts +
- * reference/status files, pre-joins, and writes the SQLite index. Idempotent and
- * resumable: re-running after an interrupt continues from the persisted state.
+ * reference/status files, pre-joins, and writes the SQLite index. Re-running
+ * after an interruption builds a complete generation from the downloaded ZIP.
  * Run at Docker image build or as a one-shot job — never on server startup.
  * @module cli/faa-mirror-init
  */

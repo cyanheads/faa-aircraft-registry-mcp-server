@@ -24,7 +24,14 @@
  * @module services/registry/ingest
  */
 
-import type { MirrorRow, SqliteHandle, SyncContext, SyncPage } from '@cyanheads/mcp-ts-core/mirror';
+import { conflict } from '@cyanheads/mcp-ts-core/errors';
+import type {
+  MirrorRow,
+  SqliteHandle,
+  SyncContext,
+  SyncLease,
+  SyncPage,
+} from '@cyanheads/mcp-ts-core/mirror';
 import { logger } from '@cyanheads/mcp-ts-core/utils';
 import { type CsvRow, parseCsv } from './csv.js';
 import { cleanField, normalizeNNumber, parseFaaDate, parseIntField } from './normalize.js';
@@ -33,38 +40,36 @@ import {
   AIRCRAFT_REF_TABLE,
   DEREG_TABLE,
   ENGINE_REF_TABLE,
-  ensureAuxiliaryTables,
   REGISTRATION_TABLE,
+  REGISTRY_GENERATION_TABLE,
   RESERVED_TABLE,
 } from './schema.js';
 import { openZipArchive, type ZipArchive } from './zip.js';
 
-/** How many MASTER parts the FAA splits the registration master across. */
-const MASTER_PART_COUNT = 9;
+/** The FAA splits the registration master across nine files. */
+const MASTER_PARTS = [
+  'MASTER-1.TXT',
+  ...Array.from({ length: 8 }, (_, i) => `MASTER-${i + 2}.TXT`),
+] as const;
 /** Rows per yielded mirror page — bounds the per-transaction batch. */
 const PAGE_SIZE = 5000;
 
 /** Reject incomplete snapshot layouts from directory metadata before any database writes. */
-function validateArchiveManifest(archive: ZipArchive): void {
+function validateArchiveManifest(archive: ZipArchive): readonly [string, ...string[]] {
   const names = new Set(
     archive.entryNames.map((name) => name.slice(name.lastIndexOf('/') + 1).toUpperCase()),
   );
   const splitParts = [...names].filter((name) => /^MASTER-\d+\.TXT$/.test(name));
-  const expectedParts = Array.from({ length: MASTER_PART_COUNT }, (_, i) => `MASTER-${i + 1}.TXT`);
-  const required = [
-    'ACFTREF.TXT',
-    'ENGINE.TXT',
-    'DEREG.TXT',
-    'RESERVED.TXT',
-    ...(splitParts.length > 0 ? expectedParts : ['MASTER.TXT']),
-  ];
+  const masterParts = splitParts.length > 0 ? MASTER_PARTS : (['MASTER.TXT'] as const);
+  const required = ['ACFTREF.TXT', 'ENGINE.TXT', 'DEREG.TXT', 'RESERVED.TXT', ...masterParts];
   const missing = required.filter((name) => !names.has(name));
-  const unexpected = splitParts.filter((name) => !expectedParts.includes(name));
+  const unexpected = splitParts.filter((name) => !MASTER_PARTS.includes(name));
   if (missing.length > 0 || unexpected.length > 0) {
     throw new Error(
       `Incomplete FAA archive manifest. Missing: ${missing.join(', ') || 'none'}. Unexpected numbered MASTER files: ${unexpected.join(', ') || 'none'}. The existing registry tables were not changed.`,
     );
   }
+  return masterParts;
 }
 
 /** A minimal engine reference, kept in memory for the MASTER join. */
@@ -77,9 +82,37 @@ interface EngineRef {
 /** A minimal aircraft reference, kept in memory for the MASTER join. */
 interface AircraftRef {
   aircraftTypeCode: string | undefined;
+  builderCertCode: string | undefined;
   engineTypeCode: string | undefined;
+  manufacturerKey: string | undefined;
+  manufacturerMatch?: 'owner' | 'organization';
   mfr: string | undefined;
   model: string | undefined;
+}
+
+type WriteBatch = (write: () => void) => void;
+
+/** Fence every raw mutation using the same owner and generation as the core runner. */
+function fencedWriter(handle: SqliteHandle, lease: SyncLease, signal: AbortSignal): WriteBatch {
+  // Core owns this table. Match the lease commit/renew fence from the SQLite
+  // store under the same immediate transaction as each server-specific write.
+  const held = handle.prepare(
+    'SELECT 1 FROM mirror_sync_lease WHERE id = 1 AND owner = ? AND generation = ?',
+  );
+  const renew = handle.prepare(
+    'UPDATE mirror_sync_lease SET expires_at = ? WHERE id = 1 AND owner = ? AND generation = ?',
+  );
+  return (write) => {
+    signal.throwIfAborted();
+    handle.transaction(() => {
+      if (!held.get(lease.owner, lease.generation)) {
+        throw conflict('FAA registry rebuild lost its sync lease.', { reason: 'sync_lease_lost' });
+      }
+      write();
+      signal.throwIfAborted();
+      renew.run(Date.now() + lease.ttlMs, lease.owner, lease.generation);
+    }, 'immediate');
+  };
 }
 
 /**
@@ -108,17 +141,21 @@ const reclaimMemory: () => void = (() => {
  * the whole table before one checkpoint). The pending batch is itself capped at
  * {@link PAGE_SIZE} rows, so it adds only a small, fixed transient.
  */
-function ingestBatched(handle: SqliteHandle, content: Buffer, onRow: (row: CsvRow) => void): void {
-  let batch: CsvRow[] = [];
+function ingestBatched<T>(
+  writeBatch: WriteBatch,
+  rows: Iterable<T>,
+  onRow: (row: T) => void,
+): void {
+  let batch: T[] = [];
   const flush = (): void => {
     if (batch.length === 0) return;
-    handle.transaction(() => {
+    writeBatch(() => {
       for (const row of batch) onRow(row);
     });
     batch = [];
     reclaimMemory();
   };
-  for (const row of parseCsv(content)) {
+  for (const row of rows) {
     batch.push(row);
     if (batch.length >= PAGE_SIZE) flush();
   }
@@ -134,8 +171,21 @@ function pick(row: CsvRow, ...keys: string[]): string | undefined {
 }
 
 /** Truncate the primary and auxiliary tables for a clean full rebuild. */
-function wipeTables(handle: SqliteHandle): void {
-  handle.transaction(() => {
+function wipeTables(
+  handle: SqliteHandle,
+  writeBatch: WriteBatch,
+  lease: SyncLease,
+  dataAsOf: string | undefined,
+): void {
+  writeBatch(() => {
+    handle
+      .prepare(`
+      INSERT INTO ${REGISTRY_GENERATION_TABLE} (id, owner, generation, loading, data_as_of)
+      VALUES (1, ?, ?, 1, ?)
+      ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, generation = excluded.generation,
+        loading = 1, data_as_of = excluded.data_as_of
+    `)
+      .run(lease.owner, lease.generation, dataAsOf ?? null);
     for (const table of [
       REGISTRATION_TABLE,
       AIRCRAFT_REF_TABLE,
@@ -150,7 +200,11 @@ function wipeTables(handle: SqliteHandle): void {
 }
 
 /** Parse ENGINE.txt into an in-memory map and populate the engine_ref table. */
-function ingestEngines(handle: SqliteHandle, content: Buffer | undefined): Map<string, EngineRef> {
+function ingestEngines(
+  handle: SqliteHandle,
+  writeBatch: WriteBatch,
+  content: Buffer | undefined,
+): Map<string, EngineRef> {
   const map = new Map<string, EngineRef>();
   if (!content) return map;
   const insert = handle.prepare(
@@ -158,7 +212,7 @@ function ingestEngines(handle: SqliteHandle, content: Buffer | undefined): Map<s
        (code, mfr, model, engine_type_code, horsepower, thrust)
        VALUES (?, ?, ?, ?, ?, ?)`,
   );
-  ingestBatched(handle, content, (row) => {
+  ingestBatched(writeBatch, parseCsv(content), (row) => {
     const code = cleanField(pick(row, 'CODE'));
     if (!code) return;
     const mfr = cleanField(pick(row, 'MFR', 'MANUFACTURER'));
@@ -180,6 +234,7 @@ function ingestEngines(handle: SqliteHandle, content: Buffer | undefined): Map<s
 /** Parse ACFTREF.txt into an in-memory map and populate aircraft_ref + its FTS. */
 function ingestAircraftRef(
   handle: SqliteHandle,
+  writeBatch: WriteBatch,
   content: Buffer | undefined,
 ): Map<string, AircraftRef> {
   const map = new Map<string, AircraftRef>();
@@ -194,14 +249,24 @@ function ingestAircraftRef(
   const insertFts = handle.prepare(
     `INSERT INTO ${AIRCRAFT_REF_FTS} (code, mfr, model) VALUES (?, ?, ?)`,
   );
-  ingestBatched(handle, content, (row) => {
+  ingestBatched(writeBatch, parseCsv(content), (row) => {
     const code = cleanField(pick(row, 'CODE'));
     if (!code) return;
     const mfr = cleanField(pick(row, 'MFR', 'MANUFACTURER'));
     const model = cleanField(pick(row, 'MODEL'));
     const aircraftTypeCode = cleanField(pick(row, 'TYPE-ACFT', 'TYPE ACFT', 'TYPE-AIRCRAFT'));
     const engineTypeCode = cleanField(pick(row, 'TYPE-ENG', 'TYPE ENG', 'TYPE-ENGINE'));
-    map.set(code, { mfr, model, aircraftTypeCode, engineTypeCode });
+    const builderCertCode = cleanField(pick(row, 'BUILD-CERT-IND', 'BUILD CERT IND'));
+    const manufacturerKey =
+      builderCertCode === '1' || builderCertCode === '2' ? nameKey(mfr) : undefined;
+    map.set(code, {
+      mfr,
+      model,
+      aircraftTypeCode,
+      engineTypeCode,
+      builderCertCode,
+      manufacturerKey,
+    });
     insert.run(
       code,
       mfr ?? null,
@@ -209,7 +274,7 @@ function ingestAircraftRef(
       aircraftTypeCode ?? null,
       engineTypeCode ?? null,
       cleanField(pick(row, 'AC-CAT', 'AC CAT')) ?? null,
-      cleanField(pick(row, 'BUILD-CERT-IND', 'BUILD CERT IND')) ?? null,
+      builderCertCode ?? null,
       parseIntField(pick(row, 'NO-ENG', 'NO ENG')) ?? null,
       parseIntField(pick(row, 'NO-SEATS', 'NO SEATS')) ?? null,
       cleanField(pick(row, 'AC-WEIGHT', 'AC WEIGHT')) ?? null,
@@ -223,25 +288,33 @@ function ingestAircraftRef(
 }
 
 /** Parse DEREG.txt and populate the dereg table (both address blocks retained). */
-function ingestDereg(handle: SqliteHandle, content: Buffer | undefined): number {
+function ingestDereg(
+  handle: SqliteHandle,
+  writeBatch: WriteBatch,
+  content: Buffer | undefined,
+  aircraftRefs: Map<string, AircraftRef>,
+): number {
   if (!content) return 0;
   const insert = handle.prepare(
     `INSERT INTO ${DEREG_TABLE}
        (n_number, serial_number, mfr_mdl_code, status_code, cancel_date, mode_s_code_hex,
         owner_name, street, street2, city, state, zip,
         physical_address, physical_address2, physical_city, physical_state,
-        physical_zip, physical_county, physical_country)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        physical_zip, physical_county, physical_country, export_country, year_mfr)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   let count = 0;
-  ingestBatched(handle, content, (row) => {
+  ingestBatched(writeBatch, parseCsv(content), (row) => {
     const nRaw = pick(row, 'N-NUMBER', 'N NUMBER');
     if (!cleanField(nRaw)) return;
     const nNumber = normalizeNNumber(nRaw ?? '');
+    const code = cleanField(pick(row, 'MFR-MDL-CODE', 'MFR MDL CODE'));
+    const ref = code ? aircraftRefs.get(code) : undefined;
+    if (ref) classifyManufacturer(ref, row, false);
     insert.run(
       nNumber,
       cleanField(pick(row, 'SERIAL-NUMBER', 'SERIAL NUMBER')) ?? null,
-      cleanField(pick(row, 'MFR-MDL-CODE', 'MFR MDL CODE')) ?? null,
+      code ?? null,
       cleanField(pick(row, 'STATUS-CODE', 'STATUS CODE')) ?? null,
       parseFaaDate(pick(row, 'CANCEL-DATE', 'CANCEL DATE')) ?? null,
       cleanField(pick(row, 'MODE S CODE HEX', 'MODE-S-CODE-HEX')) ?? null,
@@ -259,6 +332,8 @@ function ingestDereg(handle: SqliteHandle, content: Buffer | undefined): number 
       cleanField(pick(row, 'ZIP-CODE-PHYSICAL', 'PHYSICAL ZIP', 'PHYSICAL-ZIP')) ?? null,
       cleanField(pick(row, 'COUNTY-PHYSICAL', 'PHYSICAL COUNTY', 'PHYSICAL-COUNTY')) ?? null,
       cleanField(pick(row, 'COUNTRY-PHYSICAL', 'PHYSICAL COUNTRY', 'PHYSICAL-COUNTRY')) ?? null,
+      cleanField(pick(row, 'EXP-COUNTRY', 'EXP COUNTRY')) ?? null,
+      parseIntField(pick(row, 'YEAR-MFR', 'YEAR MFR')) ?? null,
     );
     count++;
   });
@@ -266,7 +341,11 @@ function ingestDereg(handle: SqliteHandle, content: Buffer | undefined): number 
 }
 
 /** Parse RESERVED.txt and populate the reserved table. */
-function ingestReserved(handle: SqliteHandle, content: Buffer | undefined): number {
+function ingestReserved(
+  handle: SqliteHandle,
+  writeBatch: WriteBatch,
+  content: Buffer | undefined,
+): number {
   if (!content) return 0;
   const insert = handle.prepare(
     `INSERT INTO ${RESERVED_TABLE}
@@ -275,7 +354,7 @@ function ingestReserved(handle: SqliteHandle, content: Buffer | undefined): numb
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   let count = 0;
-  ingestBatched(handle, content, (row) => {
+  ingestBatched(writeBatch, parseCsv(content), (row) => {
     const nRaw = pick(row, 'N-NUMBER', 'N NUMBER');
     if (!cleanField(nRaw)) return;
     const nNumber = normalizeNNumber(nRaw ?? '');
@@ -310,20 +389,45 @@ function splitCertification(raw: string | undefined): {
   const cleaned = cleanField(raw);
   if (!cleaned) return {};
   const airworthinessClass = cleaned.slice(0, 1);
-  const approvedOperationsRaw = cleanField(cleaned.slice(1));
+  // Class 6 uses positions, including leading blank slots.
+  const operations = cleaned.slice(1);
+  const approvedOperationsRaw = airworthinessClass === '6' ? operations : cleanField(operations);
   return {
     ...(airworthinessClass ? { airworthinessClass } : {}),
     ...(approvedOperationsRaw ? { approvedOperationsRaw } : {}),
   };
 }
 
+const OTHER_NAME_HEADERS = Array.from({ length: 5 }, (_, index) => {
+  const i = index + 1;
+  return [`OTHER NAMES(${i})`, `OTHER-NAMES(${i})`, `OTHER NAMES ${i}`, `OTHER-NAMES-${i}`];
+});
+const ORGANIZATION_TYPES = new Set(['3', '5', '7', '8']);
+
+function nameKey(name: string | undefined): string | undefined {
+  return cleanField(name)?.toUpperCase();
+}
+
+/** Record only the evidence outcome for this code, with MASTER organizations winning. */
+function classifyManufacturer(ref: AircraftRef, row: CsvRow, master: boolean): void {
+  const key = ref.manufacturerKey;
+  if (!key || ref.manufacturerMatch === 'organization') return;
+  if (nameKey(row.NAME) === key) {
+    const type = master ? cleanField(pick(row, 'TYPE REGISTRANT', 'TYPE-REGISTRANT')) : undefined;
+    ref.manufacturerMatch = type && ORGANIZATION_TYPES.has(type) ? 'organization' : 'owner';
+  } else if (
+    ref.manufacturerMatch !== 'owner' &&
+    OTHER_NAME_HEADERS.some((headers) => nameKey(pick(row, ...headers)) === key)
+  ) {
+    ref.manufacturerMatch = 'owner';
+  }
+}
+
 /** Collect the 1–5 OTHER NAMES columns into a JSON array string (or null). */
 function collectOtherNames(row: CsvRow): string | null {
   const names: string[] = [];
-  for (let i = 1; i <= 5; i++) {
-    const value = cleanField(
-      pick(row, `OTHER NAMES(${i})`, `OTHER NAMES ${i}`, `OTHER-NAMES-${i}`),
-    );
+  for (const headers of OTHER_NAME_HEADERS) {
+    const value = cleanField(pick(row, ...headers));
     if (value) names.push(value);
   }
   return names.length > 0 ? JSON.stringify(names) : null;
@@ -342,6 +446,7 @@ function masterRowToRecord(
   const mfrMdlCode = cleanField(pick(row, 'MFR MDL CODE', 'MFR-MDL-CODE'));
   const engMfrMdlCode = cleanField(pick(row, 'ENG MFR MDL', 'ENG-MFR-MDL', 'ENG MFR MDL CODE'));
   const aircraftRef = mfrMdlCode ? aircraftRefs.get(mfrMdlCode) : undefined;
+  if (aircraftRef) classifyManufacturer(aircraftRef, row, true);
   const engineRef = engMfrMdlCode ? engineRefs.get(engMfrMdlCode) : undefined;
 
   const cert = splitCertification(pick(row, 'CERTIFICATION', 'CERT'));
@@ -418,19 +523,11 @@ async function downloadZip(url: string, signal: AbortSignal): Promise<Buffer> {
  * MASTER.txt. Each buffer is inflated on demand as the generator advances, so only
  * one MASTER file is decompressed and resident at a time.
  */
-function* masterSources(archive: ZipArchive): Generator<Buffer> {
-  let splitPartsFound = 0;
-  for (let part = 1; part <= MASTER_PART_COUNT; part++) {
-    const content = archive.readEntry(`MASTER-${part}.txt`);
-    if (content) {
-      splitPartsFound++;
-      yield content;
-    }
-  }
-  // Fall back to a legacy single MASTER.txt only when no split parts are present.
-  if (splitPartsFound === 0) {
-    const legacy = archive.readEntry('MASTER.txt');
-    if (legacy) yield legacy;
+function* masterSources(archive: ZipArchive, names: readonly string[]): Generator<Buffer> {
+  for (const name of names) {
+    const content = archive.readEntry(name);
+    if (!content) throw new Error(`Required FAA archive entry disappeared: ${name}`);
+    yield content;
   }
 }
 
@@ -446,45 +543,47 @@ function* masterSources(archive: ZipArchive): Generator<Buffer> {
 export function createFaaIngester(
   getHandle: () => Promise<SqliteHandle>,
   sourceUrl: string,
+  lease: SyncLease,
 ): (ctx: SyncContext) => AsyncGenerator<SyncPage> {
   return async function* sync({ mode, signal }: SyncContext): AsyncGenerator<SyncPage> {
     const buffer = await downloadZip(sourceUrl, signal);
     const archive = openZipArchive(buffer);
-    validateArchiveManifest(archive);
+    const masterParts = validateArchiveManifest(archive);
+    const dataAsOf = archive.entryDate(masterParts[0]);
     logger.info(`FAA archive opened: ${archive.entryNames.length} entries (mode: ${mode})`);
 
     const handle = await getHandle();
-    // The framework's migration runner skips migrations on a fresh DB, so the
-    // auxiliary tables may not exist yet on a cold init. Create them idempotently
-    // before wiping/populating so the first run can't hit "no such table".
-    ensureAuxiliaryTables(handle);
-    wipeTables(handle);
+    const writeBatch = fencedWriter(handle, lease, signal);
+    wipeTables(handle, writeBatch, lease, dataAsOf);
 
     // Each reference/status entry is inflated on demand, consumed, then dropped
     // before the next is read — so at most one decompressed file (plus the small
     // in-memory ref maps) is resident, and peak scales with the largest file.
-    const engineRefs = ingestEngines(handle, archive.readEntry('ENGINE.txt'));
+    const engineRefs = ingestEngines(handle, writeBatch, archive.readEntry('ENGINE.txt'));
     logger.info(`Ingested ${engineRefs.size} engine reference rows`);
 
-    const aircraftRefs = ingestAircraftRef(handle, archive.readEntry('ACFTREF.txt'));
+    const aircraftRefs = ingestAircraftRef(handle, writeBatch, archive.readEntry('ACFTREF.txt'));
     logger.info(`Ingested ${aircraftRefs.size} aircraft reference rows`);
 
-    const deregCount = ingestDereg(handle, archive.readEntry('DEREG.txt'));
+    const deregCount = ingestDereg(
+      handle,
+      writeBatch,
+      archive.readEntry('DEREG.txt'),
+      aircraftRefs,
+    );
     logger.info(`Ingested ${deregCount} deregistered rows`);
 
-    const reservedCount = ingestReserved(handle, archive.readEntry('RESERVED.txt'));
+    const reservedCount = ingestReserved(handle, writeBatch, archive.readEntry('RESERVED.txt'));
     logger.info(`Ingested ${reservedCount} reserved rows`);
 
     // Stream the MASTER file(s) as registration pages — the split parts if the
     // archive ships them, else the single legacy MASTER.txt (see masterSources).
     // At least one must be present, or the rebuild produced an empty primary table.
-    let masterPartsFound = 0;
     let page: MirrorRow[] = [];
     let totalRecords = 0;
 
-    for (const content of masterSources(archive)) {
-      if (signal.aborted) return;
-      masterPartsFound++;
+    for (const content of masterSources(archive, masterParts)) {
+      signal.throwIfAborted();
       for (const row of parseCsv(content)) {
         const record = masterRowToRecord(row, aircraftRefs, engineRefs);
         if (!record) continue;
@@ -492,6 +591,7 @@ export function createFaaIngester(
         if (page.length >= PAGE_SIZE) {
           totalRecords += page.length;
           yield { records: page };
+          signal.throwIfAborted();
           page = [];
           reclaimMemory();
         }
@@ -503,14 +603,20 @@ export function createFaaIngester(
       yield { records: page };
     }
 
-    if (masterPartsFound === 0) {
-      throw new Error(
-        'FAA archive contained no MASTER parts (MASTER-1.txt…MASTER-9.txt or MASTER.txt). ' +
-          'The registry layout may have changed — verify against the live ZIP.',
-      );
-    }
+    const classify = handle.prepare(
+      `UPDATE ${AIRCRAFT_REF_TABLE} SET manufacturer_redacted = ? WHERE code = ?`,
+    );
+    ingestBatched(writeBatch, aircraftRefs, ([code, ref]) => {
+      if (
+        ref.builderCertCode === '0' ||
+        ref.builderCertCode === '1' ||
+        ref.builderCertCode === '2'
+      ) {
+        classify.run(ref.manufacturerMatch === 'owner' ? 1 : 0, code);
+      }
+    });
     logger.info(
-      `FAA registration ingest complete: ${totalRecords} records across ${masterPartsFound} MASTER part(s)`,
+      `FAA registration ingest complete: ${totalRecords} records across ${masterParts.length} MASTER part(s)`,
     );
   };
 }

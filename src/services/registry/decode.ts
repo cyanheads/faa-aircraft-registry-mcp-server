@@ -7,6 +7,8 @@
  * @module services/registry/decode
  */
 
+import type { CodedValue } from './types.js';
+
 /** Look up a code in a map, normalizing case/whitespace; undefined when blank/unknown. */
 function decode(
   map: Readonly<Record<string, string>>,
@@ -124,7 +126,7 @@ const REGION: Readonly<Record<string, string>> = {
 };
 
 /** Airworthiness Classification — CERTIFICATION field char 1. */
-const AIRWORTHINESS_CLASS: Readonly<Record<string, string>> = {
+const AIRWORTHINESS_CLASS = {
   '1': 'Standard',
   '2': 'Limited',
   '3': 'Restricted',
@@ -134,7 +136,104 @@ const AIRWORTHINESS_CLASS: Readonly<Record<string, string>> = {
   '7': 'Primary',
   '8': 'Special Flight Permit',
   '9': 'Light Sport',
+} satisfies Readonly<Record<string, string>>;
+
+/** Approved operations depend on the preceding airworthiness class. */
+const RESTRICTED_OPERATIONS: Readonly<Record<string, string>> = {
+  '0': 'Other',
+  '1': 'Agriculture and Pest Control',
+  '2': 'Aerial Surveying',
+  '3': 'Aerial Advertising',
+  '4': 'Forest',
+  '5': 'Patrolling',
+  '6': 'Weather Control',
+  '7': 'Carriage of Cargo',
 };
+
+const EXPERIMENTAL_COMPOUNDS: Readonly<Record<string, string>> = {
+  '8A': 'Registered Prior to 01/31/08',
+  '8B': 'Operating Light-Sport Kit-Built',
+  '8C': 'Operating Light-Sport Previously Issued Certificate under 21.190',
+  '9A': 'Unmanned Aircraft - Research and Development',
+  '9B': 'Unmanned Aircraft - Market Survey',
+  '9C': 'Unmanned Aircraft - Crew Training',
+  '9D': 'Unmanned Aircraft - Exhibition',
+  '9E': 'Unmanned Aircraft - Compliance With CFR',
+};
+
+const APPROVED_OPERATIONS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  '1': {
+    N: 'Normal',
+    U: 'Utility',
+    A: 'Acrobatic',
+    T: 'Transport',
+    G: 'Glider',
+    B: 'Balloon',
+    C: 'Commuter',
+    O: 'Other',
+  },
+  '3': RESTRICTED_OPERATIONS,
+  '4': {
+    '0': 'To show compliance with FAR',
+    '1': 'Research and Development',
+    '2': 'Amateur Built',
+    '3': 'Exhibition',
+    '4': 'Racing',
+    '5': 'Crew Training',
+    '6': 'Market Survey',
+    '7': 'Operating Kit Built Aircraft',
+  },
+  '5': { '1': 'Class I', '2': 'Class II' },
+  '8': {
+    '1': 'Ferry flight for repairs, alterations, maintenance or storage',
+    '2': 'Evacuate from area of impending danger',
+    '3': 'Operation in excess of maximum certificated',
+    '4': 'Delivery or export',
+    '5': 'Production flight testing',
+    '6': 'Customer Demo',
+  },
+  '9': {
+    A: 'Airplane',
+    G: 'Glider',
+    L: 'Lighter than Air',
+    P: 'Power-Parachute',
+    W: 'Weight-Shift-Control',
+  },
+};
+
+const MULTIPLE_CLASSES: Readonly<Record<string, string>> = {
+  '1': AIRWORTHINESS_CLASS['1'],
+  '2': AIRWORTHINESS_CLASS['2'],
+  '3': AIRWORTHINESS_CLASS['3'],
+};
+
+/** Decode operations in FAA field order, keeping unknown fragments without labels. */
+export function decodeApprovedOperations(
+  classCode: string | undefined,
+  raw: string | undefined,
+): CodedValue[] | undefined {
+  if (!raw) return;
+  const operations: CodedValue[] = [];
+  const table = classCode === '6' ? RESTRICTED_OPERATIONS : APPROVED_OPERATIONS[classCode ?? ''];
+  for (let index = 0; index < raw.length; index++) {
+    const code = raw.charAt(index);
+    if (code.trim() === '') continue;
+    if (classCode === '4') {
+      const pair = raw.slice(index, index + 2);
+      const compound = EXPERIMENTAL_COMPOUNDS[pair.toUpperCase()];
+      if (compound) {
+        operations.push({ code: pair, label: compound });
+        index++;
+        continue;
+      }
+    }
+    // Multiple certificates reserve the first two positions for class codes.
+    const map = classCode === '6' && index < 2 ? MULTIPLE_CLASSES : table;
+    const label = map?.[code.toUpperCase()];
+    operations.push(label ? { code, label } : { code });
+  }
+  return operations.length > 0 ? operations : undefined;
+}
 
 /** Aircraft Category — ACFTREF AC-CAT. */
 const AIRCRAFT_CATEGORY: Readonly<Record<string, string>> = {

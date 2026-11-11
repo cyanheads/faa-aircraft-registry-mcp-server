@@ -21,6 +21,8 @@ export const DEREG_TABLE = 'dereg';
 export const RESERVED_TABLE = 'reserved';
 /** Auxiliary FTS index over aircraft_ref (its own fts5 table, populated by the ingester). */
 export const AIRCRAFT_REF_FTS = 'aircraft_ref_fts';
+/** The FAA generation marker, written with the wipe and published with terminal sync state. */
+export const REGISTRY_GENERATION_TABLE = 'registry_generation';
 
 /**
  * Column scopes for user-supplied search terms. Every free-text filter is
@@ -48,7 +50,7 @@ export function registrationStoreSpec(path: string): SqliteMirrorStoreSpec {
     path,
     table: REGISTRATION_TABLE,
     primaryKey: 'n_number',
-    version: 1,
+    version: 2,
     columns: {
       n_number: 'TEXT',
       serial_number: 'TEXT',
@@ -93,23 +95,15 @@ export function registrationStoreSpec(path: string): SqliteMirrorStoreSpec {
       { columns: ['state'] },
       { columns: ['aircraft_type_code'] },
     ],
-    migrations: [auxiliaryTablesMigration()],
+    migrations: [auxiliaryTablesMigration(), { version: 2, up: upgradeRegistryTables }],
   };
 }
 
 /**
- * Idempotent DDL for the auxiliary reference/status tables and the aircraft_ref
- * FTS index (`CREATE … IF NOT EXISTS` throughout) — safe to run on every open.
- *
- * These tables are NOT part of the MirrorService primary-table DDL. Two paths
- * create them, and both must stay idempotent: {@link auxiliaryTablesMigration},
- * which the framework runner applies on a freshly created database as well as
- * on upgrade, and the ingester, which runs this DDL unconditionally at the start
- * of every sync before it touches the tables. The second is what guarantees the
- * tables on a mirror whose schema version was already stamped, and it matches
- * how the framework builds the primary table (idempotent, on every open).
+ * Version 1 auxiliary reference/status tables and aircraft_ref FTS index.
+ * The framework applies this before the version 2 upgrade on a fresh database.
  */
-export function ensureAuxiliaryTables(handle: SqliteHandle): void {
+function ensureAuxiliaryTables(handle: SqliteHandle): void {
   handle.exec(`
         CREATE TABLE IF NOT EXISTS ${AIRCRAFT_REF_TABLE} (
           code TEXT PRIMARY KEY NOT NULL,
@@ -199,4 +193,41 @@ function auxiliaryTablesMigration(): Migration {
     version: 1,
     up: ensureAuxiliaryTables,
   };
+}
+
+/** Add classification, history, serial indexing, and generation publication. */
+function upgradeRegistryTables(handle: SqliteHandle): void {
+  // Older core releases could stamp a fresh schema before running migrations.
+  // A cold v1 index from those releases can be missing the auxiliary tables.
+  ensureAuxiliaryTables(handle);
+  handle.exec(`
+    ALTER TABLE ${AIRCRAFT_REF_TABLE} ADD COLUMN manufacturer_redacted INTEGER;
+    ALTER TABLE ${DEREG_TABLE} ADD COLUMN export_country TEXT;
+    ALTER TABLE ${DEREG_TABLE} ADD COLUMN year_mfr INTEGER;
+    CREATE INDEX idx_registration_serial_nocase
+      ON ${REGISTRATION_TABLE} (serial_number COLLATE NOCASE);
+    CREATE TABLE ${REGISTRY_GENERATION_TABLE} (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      owner TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      loading INTEGER NOT NULL CHECK (loading IN (0, 1)),
+      data_as_of TEXT
+    );
+  `);
+  // Core's SQLite lease commit updates mirror_sync_state inside its fenced
+  // transaction. Publish there so a process exit after commit cannot strand a
+  // successful rebuild as loading, and a failed terminal commit cannot publish.
+  handle.exec(`
+    CREATE TRIGGER faa_publish_generation AFTER UPDATE OF status ON mirror_sync_state
+    WHEN NEW.id = 1 AND NEW.status = 'complete' AND NEW.completed_at IS NOT NULL
+    BEGIN
+      UPDATE ${REGISTRY_GENERATION_TABLE} SET loading = 0
+      WHERE id = 1 AND loading = 1 AND EXISTS (
+        SELECT 1 FROM mirror_sync_lease AS lease
+        WHERE lease.id = 1
+          AND lease.owner = ${REGISTRY_GENERATION_TABLE}.owner
+          AND lease.generation = ${REGISTRY_GENERATION_TABLE}.generation
+      );
+    END;
+  `);
 }

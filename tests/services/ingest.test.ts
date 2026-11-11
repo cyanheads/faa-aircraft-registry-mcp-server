@@ -1,6 +1,6 @@
 /**
  * @fileoverview End-to-end regression guard for the FAA ingester over a small,
- * synthetic ZIP served from localhost — no multi-hundred-MB real archive. It
+ * synthetic ZIP at the download boundary. It
  * exercises the whole rebuild path the memory fix touches: lazy per-entry
  * decompression, streaming line parsing straight from the entry buffers, the
  * chunked auxiliary inserts, and the MASTER → ACFTREF/ENGINE join. The MASTER and
@@ -10,11 +10,10 @@
  * @module tests/services/ingest.test
  */
 
-import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { defineMirror, type Mirror, sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
+import { type Mirror, sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { createFaaIngester } from '@/services/registry/ingest.js';
+import { createRegistryMirror } from '@/services/registry/registry-mirror.js';
+import { withRegistrySnapshot } from '@/services/registry/registry-snapshot.js';
 import { registrationStoreSpec } from '@/services/registry/schema.js';
 import { buildFixtureDb, tempDbPath } from '../fixtures/build-fixture-db.js';
 import { makeZip, type ZipInput } from '../fixtures/make-zip.js';
@@ -55,7 +54,7 @@ function deregTxt(): string {
 const reservedTxt =
   'N-NUMBER,REGISTRANT,CITY,STATE,TR,RSV DATE\n70001,RESERVER LLC,TACOMA,WA,FP,20260101\n70002,SKY HOLD,OLYMPIA,WA,FP,20260201\n';
 
-let server: Server;
+let restoreFetch: () => void;
 let mirror: Mirror;
 
 beforeAll(async () => {
@@ -68,28 +67,20 @@ beforeAll(async () => {
     { name: 'DEALER.txt', data: Buffer.from('X,Y\n1,2\n', 'latin1') }, // present but never read
   ]);
 
-  server = createServer((_req, res) => {
-    res.writeHead(200, { 'Content-Type': 'application/zip' });
-    res.end(zip);
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/ReleasableAircraft.zip`;
+  const fetchZip = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(zip));
+  restoreFetch = () => fetchZip.mockRestore();
+  const url = 'https://example.invalid/ReleasableAircraft.zip';
 
-  const store = sqliteMirrorStore(registrationStoreSpec(tempDbPath()));
-  mirror = defineMirror({
-    name: 'faa-registry-test',
-    store,
-    sync: createFaaIngester(() => store.raw(), url),
-  });
+  mirror = createRegistryMirror({ mirrorPath: tempDbPath(), databaseUrl: url });
   await mirror.runSync({ mode: 'init', signal: AbortSignal.timeout(60_000) });
 }, 60_000);
 
 afterAll(async () => {
   await mirror?.close();
-  await new Promise<void>((resolve) => server?.close(() => resolve()));
+  restoreFetch?.();
 });
 
-describe('createFaaIngester — end-to-end rebuild', () => {
+describe('FAA mirror rebuild', () => {
   async function count(table: string): Promise<number> {
     const handle = await mirror.raw();
     return handle.prepare<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n ?? -1;
@@ -138,19 +129,23 @@ async function manifestProbe(
   entries: ZipInput[],
   expectedError?: string,
   corruptFirst = false,
+  dataAsOf?: string,
 ): Promise<void> {
   const path = tempDbPath();
   await buildFixtureDb(path);
-  const store = sqliteMirrorStore(registrationStoreSpec(path));
-  const handle = await store.raw();
+  const mirror = createRegistryMirror({
+    mirrorPath: path,
+    databaseUrl: 'https://example.invalid/fixture.zip',
+  });
+  const handle = await mirror.raw();
   const zip = makeZip(entries);
   if (corruptFirst) zip.writeUInt32LE(0, 0);
   const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(zip));
   try {
-    const sync = createFaaIngester(() => store.raw(), 'https://example.invalid/fixture.zip');
-    const generator = sync({ mode: 'init', signal: AbortSignal.timeout(5000) });
+    const run = mirror.runSync({ mode: 'init', signal: AbortSignal.timeout(5000) });
     if (expectedError) {
-      await expect(generator.next()).rejects.toThrow(new RegExp(expectedError, 'i'));
+      await expect(run).rejects.toThrow(new RegExp(expectedError, 'i'));
+      expect(withRegistrySnapshot(handle, (snapshot) => snapshot)).toEqual({});
       for (const [table, total] of [
         ['registration', 4],
         ['aircraft_ref', 6],
@@ -166,13 +161,15 @@ async function manifestProbe(
         handle.prepare('SELECT * FROM registration WHERE n_number = ?').get('12345'),
       ).toBeDefined();
     } else {
-      const rows = [];
-      for await (const page of generator) rows.push(...page.records);
-      expect(rows.map((r) => r.n_number)).toEqual(['10000']);
+      await run;
+      expect(handle.prepare('SELECT n_number FROM registration').all()).toEqual([
+        { n_number: '10000' },
+      ]);
+      expect(withRegistrySnapshot(handle, (snapshot) => snapshot.dataAsOf)).toBe(dataAsOf);
     }
   } finally {
     fetch.mockRestore();
-    await store.close();
+    await mirror.close();
   }
 }
 
@@ -183,6 +180,7 @@ const auxiliaryEntries: ZipInput[] = [
   { name: 'RESERVED.txt', data: Buffer.from(reservedTxt) },
 ];
 const oneMaster = Buffer.from('N-NUMBER,MFR MDL CODE\n10000,2072714\n');
+const nov9 = ((2026 - 1980) << 9) | (11 << 5) | 9;
 
 describe('archive manifest', () => {
   it.each(['ENGINE.txt', 'ACFTREF.txt', 'DEREG.txt', 'RESERVED.txt'])(
@@ -229,21 +227,269 @@ describe('archive manifest', () => {
   });
 
   it('accepts all nine split parts and ignores legacy when parts are present', async () => {
-    await manifestProbe([
-      ...auxiliaryEntries,
-      ...Array.from({ length: 9 }, (_, i) => ({
-        name: `folder/MASTER-${i + 1}.TXT`,
-        data: i === 0 ? oneMaster : Buffer.from('N-NUMBER\n'),
-      })),
-      { name: 'MASTER.txt', data: Buffer.from('N-NUMBER\n90000\n') },
-    ]);
+    await manifestProbe(
+      [
+        ...auxiliaryEntries,
+        ...Array.from({ length: 9 }, (_, i) => ({
+          name: `folder/MASTER-${i + 1}.TXT`,
+          data: i === 0 ? oneMaster : Buffer.from('N-NUMBER\n'),
+          dosDate: nov9 + i,
+        })),
+        { name: 'MASTER.txt', data: Buffer.from('N-NUMBER\n90000\n'), dosDate: nov9 + 1 },
+      ],
+      undefined,
+      false,
+      '2026-11-09',
+    );
   });
   it('accepts complete legacy archives using case-insensitive nested basenames', async () => {
     await manifestProbe(
-      [...auxiliaryEntries, { name: 'MASTER.txt', data: oneMaster }].map((entry) => ({
-        ...entry,
-        name: `folder/nested/${entry.name.toLowerCase()}`,
-      })),
+      [...auxiliaryEntries, { name: 'MASTER.txt', data: oneMaster, dosDate: nov9 }].map(
+        (entry) => ({
+          ...entry,
+          name: `folder/nested/${entry.name.toLowerCase()}`,
+        }),
+      ),
+      undefined,
+      false,
+      '2026-11-09',
     );
+  });
+});
+
+describe('generation publication', () => {
+  const databaseUrl = 'https://example.invalid/registry.zip';
+  const smallAuxiliaryEntries: ZipInput[] = auxiliaryEntries.map((entry) =>
+    entry.name === 'DEREG.txt' ? { ...entry, data: Buffer.from('N-NUMBER\n') } : entry,
+  );
+  const fixtureArchive = (number: string, dosDate: number): Buffer =>
+    makeZip([
+      ...smallAuxiliaryEntries,
+      { name: 'MASTER.txt', dosDate, data: Buffer.from(`N-NUMBER\n${number}\n`) },
+    ]);
+
+  it('blocks a separate reader during and after an abort that leaves one page committed', async () => {
+    const mirrorPath = tempDbPath();
+    const mirror = createRegistryMirror({ mirrorPath, databaseUrl });
+    const reader = sqliteMirrorStore(registrationStoreSpec(mirrorPath));
+    const stop = new AbortController();
+    const abortedArchive = makeZip([
+      ...smallAuxiliaryEntries,
+      {
+        name: 'MASTER.txt',
+        dosDate: nov9 + 1,
+        data: Buffer.from(
+          `N-NUMBER\n${Array.from({ length: 5001 }, (_, i) => 10000 + i).join('\n')}\n`,
+        ),
+      },
+    ]);
+    const fetch = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(async () => new Response(fixtureArchive('99991', nov9)))
+      .mockImplementationOnce(async () => new Response(abortedArchive))
+      .mockImplementationOnce(async () => new Response(fixtureArchive('99992', nov9 + 2)));
+    try {
+      await mirror.runSync({ mode: 'init' });
+      const handle = await reader.raw();
+      const readDate = () => withRegistrySnapshot(handle, (snapshot) => snapshot.dataAsOf);
+      const loading = expect.objectContaining({
+        data: { reason: 'mirror_loading', retryable: true },
+      });
+      expect(readDate()).toBe('2026-11-09');
+      await expect(
+        mirror.runSync({
+          mode: 'refresh',
+          signal: stop.signal,
+          onProgress(progress) {
+            expect(progress.records).toBe(5000);
+            expect(readDate).toThrow(loading);
+            stop.abort(new Error('Stopped after first page'));
+          },
+        }),
+      ).rejects.toThrow('Stopped after first page');
+      expect(await reader.count()).toBe(5000);
+      expect(readDate).toThrow(loading);
+      await mirror.runSync({ mode: 'refresh' });
+      expect(readDate()).toBe('2026-11-11');
+      expect(await reader.count()).toBe(1);
+    } finally {
+      fetch.mockRestore();
+      await Promise.all([mirror.close(), reader.close()]);
+    }
+  });
+
+  it('keeps the old date and data when the download fails before the wipe', async () => {
+    const mirror = createRegistryMirror({ mirrorPath: tempDbPath(), databaseUrl });
+    const fetch = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(async () => new Response(fixtureArchive('12345', nov9)))
+      .mockImplementationOnce(async () => new Response(null, { status: 503 }));
+    try {
+      await mirror.runSync({ mode: 'init' });
+      await expect(mirror.runSync({ mode: 'refresh' })).rejects.toThrow('HTTP 503');
+      const handle = await mirror.raw();
+      expect(
+        withRegistrySnapshot(handle, (snapshot) => ({
+          ...snapshot,
+          rows: handle.prepare('SELECT n_number FROM registration').all(),
+        })),
+      ).toEqual({ dataAsOf: '2026-11-09', rows: [{ n_number: '12345' }] });
+    } finally {
+      fetch.mockRestore();
+      await mirror.close();
+    }
+  });
+
+  it('rejects an expired writer before it can wipe the takeover generation', async () => {
+    const mirrorPath = tempDbPath();
+    const stale = createRegistryMirror({ mirrorPath, databaseUrl });
+    const fresh = createRegistryMirror({ mirrorPath, databaseUrl });
+    const entered = Promise.withResolvers<void>();
+    const first = Promise.withResolvers<Response>();
+    const fetch = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(() => {
+        entered.resolve();
+        return first.promise;
+      })
+      .mockImplementationOnce(async () => new Response(fixtureArchive('20002', nov9 + 1)));
+    const staleRun = stale.runSync({ mode: 'refresh' });
+    // Attach the rejection assertion before unblocking the async download.
+    const rejected = expect(staleRun).rejects.toMatchObject({
+      data: { reason: 'sync_lease_lost' },
+    });
+    try {
+      await entered.promise;
+      await expect(stale.runSync({ mode: 'refresh' })).rejects.toMatchObject({
+        data: { reason: 'sync_locked' },
+      });
+      const handle = await fresh.raw();
+      handle.exec('UPDATE mirror_sync_lease SET expires_at = 0');
+      await fresh.runSync({ mode: 'refresh' });
+      first.resolve(new Response(fixtureArchive('10001', nov9)));
+      await rejected;
+      expect(
+        withRegistrySnapshot(handle, (snapshot) => ({
+          ...snapshot,
+          rows: handle.prepare('SELECT n_number FROM registration').all(),
+        })),
+      ).toEqual({ dataAsOf: '2026-11-10', rows: [{ n_number: '20002' }] });
+    } finally {
+      first.resolve(new Response(null, { status: 503 }));
+      await Promise.allSettled([staleRun, rejected]);
+      fetch.mockRestore();
+      await Promise.all([stale.close(), fresh.close()]);
+    }
+  });
+
+  it('keeps the generation loading when the terminal state transaction fails', async () => {
+    const mirror = createRegistryMirror({ mirrorPath: tempDbPath(), databaseUrl });
+    const fetch = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response(fixtureArchive('12345', nov9)));
+    try {
+      const handle = await mirror.raw();
+      handle.exec(`
+        CREATE TRIGGER reject_terminal BEFORE UPDATE OF status ON mirror_sync_state
+        WHEN NEW.status = 'complete'
+        BEGIN SELECT RAISE(ABORT, 'terminal commit failed'); END;
+      `);
+      await expect(mirror.runSync({ mode: 'init' })).rejects.toThrow('terminal commit failed');
+      expect(await mirror.store.count()).toBe(1);
+      expect(() => withRegistrySnapshot(handle, () => undefined)).toThrow(
+        expect.objectContaining({ data: { reason: 'mirror_loading', retryable: true } }),
+      );
+      handle.exec('DROP TRIGGER reject_terminal');
+      await mirror.runSync({ mode: 'refresh' });
+      expect(withRegistrySnapshot(handle, (snapshot) => snapshot)).toEqual({
+        dataAsOf: '2026-11-09',
+      });
+    } finally {
+      fetch.mockRestore();
+      await mirror.close();
+    }
+  });
+});
+
+describe('manufacturer classification and cancellation fields', () => {
+  it('considers primary and co-owners in both files, preferring MASTER organizations', async () => {
+    const mirror = createRegistryMirror({
+      mirrorPath: tempDbPath(),
+      databaseUrl: 'https://example.invalid/registry.zip',
+    });
+    const zip = makeZip([
+      { name: 'ENGINE.txt', data: Buffer.from(engineTxt) },
+      { name: 'RESERVED.txt', data: Buffer.from(reservedTxt) },
+      {
+        name: 'ACFTREF.txt',
+        data: Buffer.from(
+          [
+            'CODE,MFR,MODEL,BUILD-CERT-IND',
+            '1000001,MASTER PRIMARY,MX,1',
+            '1000002,MASTER OTHER,MX,2',
+            '1000003,DEREG PRIMARY,MX,1',
+            '1000004,DEREG OTHER,MX,2',
+            '1000005,ORGANIZATION,MX,2',
+            '1000006,CERTIFIED,MX,0',
+            '1000007,UNMATCHED,MX,1',
+            '1000008,UNKNOWN,MX,',
+          ].join('\n'),
+        ),
+      },
+      {
+        name: 'DEREG.txt',
+        data: Buffer.from(
+          [
+            'N-NUMBER,MFR-MDL-CODE,NAME,OTHER-NAMES(5),EXP-COUNTRY,YEAR-MFR',
+            '44441,1000003, dereg primary ,,CANADA,1987',
+            '44442,1000004,OTHER OWNER,DEREG OTHER,,',
+            '44443,1000005,ORGANIZATION,,,',
+          ].join('\n'),
+        ),
+      },
+      {
+        name: 'MASTER.txt',
+        data: Buffer.from(
+          [
+            'N-NUMBER,MFR MDL CODE,NAME,OTHER NAMES(5),TYPE REGISTRANT,CERTIFICATION',
+            '11111,1000001, master primary ,,1,6  A  ',
+            '22222,1000002,OTHER OWNER,MASTER OTHER,1,',
+            '33333,1000005,ORGANIZATION,,7,',
+            '44444,1000006,CERTIFIED,,1,',
+          ].join('\n'),
+        ),
+      },
+    ]);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(zip));
+    try {
+      await mirror.runSync({ mode: 'init' });
+      const handle = await mirror.raw();
+      const flags = handle
+        .prepare<{ manufacturer_redacted: number | null }>(
+          'SELECT manufacturer_redacted FROM aircraft_ref ORDER BY code',
+        )
+        .all();
+      expect(flags.map((row) => row.manufacturer_redacted)).toEqual([1, 1, 1, 1, 0, 0, 0, null]);
+      expect(
+        handle
+          .prepare('SELECT export_country, year_mfr FROM dereg ORDER BY n_number LIMIT 2')
+          .all(),
+      ).toEqual([
+        { export_country: 'CANADA', year_mfr: 1987 },
+        { export_country: null, year_mfr: null },
+      ]);
+      expect(
+        handle
+          .prepare('SELECT approved_operations_raw FROM registration WHERE n_number = ?')
+          .get('11111'),
+      ).toEqual({
+        approved_operations_raw: '  A',
+      });
+      const persistedDereg = handle.prepare('SELECT * FROM dereg WHERE n_number = ?').get('44442');
+      expect(JSON.stringify(persistedDereg)).not.toContain('DEREG OTHER');
+    } finally {
+      fetch.mockRestore();
+      await mirror.close();
+    }
   });
 });

@@ -6,8 +6,9 @@
  * @module tests/lifecycle.test
  */
 
-import { schedulerService } from '@cyanheads/mcp-ts-core/utils';
-import { afterEach, describe, expect, it } from 'vitest';
+import { conflict, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { requestContextService, schedulerService } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { REFRESH_JOB_ID, scheduleDailyRefresh, teardownServer } from '@/lifecycle.js';
 import {
   getRegistryService,
@@ -33,8 +34,33 @@ const jobRegistered = (): boolean =>
   schedulerService.listJobs().some((job) => job.id === REFRESH_JOB_ID);
 
 afterEach(() => {
+  vi.restoreAllMocks();
   if (jobRegistered()) schedulerService.remove(REFRESH_JOB_ID);
   resetRegistryService();
+});
+
+describe('scheduled refresh errors', () => {
+  it.each([
+    [conflict('held', { reason: 'sync_locked' }), true],
+    [conflict('lost', { reason: 'sync_lease_lost' }), false],
+    [serviceUnavailable('other error with the same reason', { reason: 'sync_locked' }), false],
+    [new Error('archive could not be read'), false],
+  ] as const)('skips only a Conflict from an already-held lease: %s', async (failure, skip) => {
+    await initService();
+    const mirror = getRegistryService().mirrorInstance;
+    const sync = vi.spyOn(mirror, 'runSync').mockRejectedValue(failure);
+    const schedule = vi.spyOn(schedulerService, 'schedule');
+    await scheduleDailyRefresh();
+    const task = schedule.mock.calls[0]?.[2];
+    if (!task) throw new Error('Refresh task was never scheduled.');
+    const run = Promise.resolve(
+      task(requestContextService.createRequestContext({ operation: 'test-refresh' })),
+    );
+    if (skip) await expect(run).resolves.toBeUndefined();
+    else await expect(run).rejects.toBe(failure);
+    expect(sync).toHaveBeenCalledWith({ mode: 'refresh' });
+    await teardownServer();
+  });
 });
 
 describe('teardownServer', () => {

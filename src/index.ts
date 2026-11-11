@@ -24,6 +24,7 @@ await createApp({
   title: 'faa-aircraft-registry-mcp-server',
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
+  skills: 'skills',
   /**
    * Every tool is a single-shot read over the local index — no `ctx.requestInput`,
    * no `ctx.state`, nothing carried between calls. Declared here rather than left
@@ -32,7 +33,7 @@ await createApp({
    */
   sessionMode: 'stateless',
   instructions:
-    'Offline, keyless lookup of the US civil aircraft registry (the FAA Releasable Aircraft Database, indexed locally as SQLite + FTS5). Decode an N-number with faa_lookup_registration ("N12345" or "12345" both work); resolve active/deregistered/reserved status with faa_get_registration_status; search by owner/make-model/manufacturerModelCode/state/type/Mode S with faa_search_registrations. Discover 6–7-character manufacturer/model/series codes with faa_search_aircraft_types, pass manufacturerModelCode to faa_search_registrations for exact matches, then faa_lookup_registration for details; faa_get_aircraft_type returns code-specific specs. Coded fields surface both the raw FAA code and the decoded label. Owner name and address are REDACTED by default (FAA_REDACT_OWNER_PII); when redacted, owner-name search is disabled and payloads carry ownerRedacted: true. The index must be built once via the mirror:init script before queries succeed.',
+    'Look up the offline US civil aircraft registry. Use faa_lookup_registration for an active N-number, or faa_get_registration_status for its current state and cancellation history. Find registrations by make/model token prefixes, exact manufacturer/model code or serial number, state, aircraft type, or Mode S. Discover manufacturer/model codes with faa_search_aircraft_types and get their specs with faa_get_aircraft_type. Coded fields include the raw FAA code and any known label. By default, owner details and personal builder names are withheld, and owner-name search is disabled. The operator must initialize the registry mirror before queries can succeed.',
   landing: {
     requireAuth: false,
     tagline:
@@ -52,7 +53,7 @@ await createApp({
     ],
   },
 
-  setup(core) {
+  async setup(core) {
     initRegistryService({
       redactOwnerPii: serverConfig.redactOwnerPii,
       mirrorPath: serverConfig.mirrorPath,
@@ -65,7 +66,7 @@ await createApp({
      * scheduling there would attach a cron to a short-lived process.
      */
     if (core.config.mcpTransportType === 'http') {
-      void scheduleDailyRefresh();
+      await scheduleDailyRefresh();
     }
   },
 

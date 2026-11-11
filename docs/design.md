@@ -15,10 +15,10 @@ Releasable Aircraft Database, indexed on disk as SQLite + FTS5. Keyless, no runt
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `faa_lookup_registration` | The 80% tool. Decode one N-number to its full pre-joined record — aircraft make/model, engine, year, registered owner, airworthiness, and registration status. One call resolves the MASTER → ACFTREF → ENGINE join and decodes all coded fields. | `nNumber` (string, "N12345" or "12345") | `readOnlyHint: true`, `openWorldHint: false` |
-| `faa_search_registrations` | Search active registrations by owner name, make/model, exact manufacturer/model code, state, aircraft type, or Mode S code. Filters are AND-combined. Free-text terms are column-scoped — `makeModel` matches `make`/`model` only, `ownerName` matches `owner_name`/`other_names` only. Summaries carry stored manufacturer/model codes and N-numbers for `faa_lookup_registration`. | `ownerName?`, `makeModel?`, `manufacturerModelCode?`, `state?`, `aircraftType?`, `modeSCode?`, `limit?`, `offset?` | `readOnlyHint: true`, `openWorldHint: false` |
+| `faa_search_registrations` | Search active registrations by exact serial or manufacturer/model code, make/model prefixes, state, aircraft type, Mode S code, or owner when unredacted. Filters are AND-combined; hidden manufacturer names cannot drive matches. Summaries carry serials, model codes, and N-numbers. | `ownerName?`, `makeModel?`, `manufacturerModelCode?`, `serialNumber?`, `state?`, `aircraftType?`, `modeSCode?`, `limit?`, `offset?` | `readOnlyHint: true`, `openWorldHint: false` |
 | `faa_search_aircraft_types` | Search the aircraft reference table by manufacturer/model name, category, or aircraft type to discover manufacturer-model codes and browse specs. Fills the discovery gap before `faa_get_aircraft_type`. | `query?`, `aircraftType?`, `category?`, `limit?`, `offset?` | `readOnlyHint: true`, `openWorldHint: false` |
 | `faa_get_aircraft_type` | Decode a 6–7-character manufacturer/model/series code to aircraft specs — make, model, category, aircraft type, engine type, engine count, seats, weight class, cruise speed, type-certificate data. | `code` (6–7-char alphanumeric) | `readOnlyHint: true`, `openWorldHint: false` |
-| `faa_get_registration_status` | Resolve registration + airworthiness status for an N-number across all three status files — active (MASTER), deregistered (DEREG), reserved (RESERVED) — returning a definitive `recordType` instead of a not-found when a number is known-but-inactive. | `nNumber` (string, "N12345" or "12345") | `readOnlyHint: true`, `openWorldHint: false` |
+| `faa_get_registration_status` | Resolve current state in MASTER → RESERVED → DEREG order, with available cancellation history, aircraft identity, and export country. A cancellation's status describes its historical row. | `nNumber` (string, "N12345" or "12345") | `readOnlyHint: true`, `openWorldHint: false` |
 
 5 tools. All read-only, deterministic against the local index, `openWorldHint: false` (no live network at runtime).
 
@@ -35,14 +35,15 @@ in the service layer, common to every tool.
 | `faa_lookup_registration` | `not_found` | `NotFound` | N-number normalized and valid but no active MASTER record | Call `faa_get_registration_status` to check if it is deregistered or reserved, or `faa_search_registrations` to find the right N-number. |
 | `faa_lookup_registration` | `invalid_n_number` | `ValidationError` | N-number fails domain validation after normalization | Provide a valid US N-number (1–5 chars after an optional "N": leading digit 1–9, then digits, optionally one or two trailing letters; I and O unused). Example: N172SP. |
 | `faa_lookup_registration` | `owner_redacted` | *(not an error — `ownerRedacted: true` flag on success)* | — | — |
-| `faa_search_registrations` | `owner_search_disabled` | `ValidationError` | `ownerName` supplied while `FAA_REDACT_OWNER_PII` is on | Drop ownerName; search by makeModel, manufacturerModelCode, state, aircraftType, or modeSCode. |
-| `faa_search_registrations` | `no_filters` | `ValidationError` | No search filter supplied | Provide makeModel, manufacturerModelCode, state, aircraftType, or modeSCode (ownerName when PII is unredacted). |
+| `faa_search_registrations` | `owner_search_disabled` | `ValidationError` | `ownerName` supplied while `FAA_REDACT_OWNER_PII` is on | Drop ownerName; search by makeModel, manufacturerModelCode, serialNumber, state, aircraftType, or modeSCode. |
+| `faa_search_registrations` | `no_filters` | `ValidationError` | No search filter supplied | Provide makeModel, manufacturerModelCode, serialNumber, state, aircraftType, or modeSCode (ownerName when PII is unredacted). |
 | `faa_search_registrations` | `invalid_code` | `ValidationError` | manufacturerModelCode is malformed | Discover a 6–7-character alphanumeric code with `faa_search_aircraft_types`. |
 | `faa_search_aircraft_types` | `no_filters` | `ValidationError` | No search filter supplied | Provide a query, aircraftType, or category to search the reference table. |
 | `faa_get_aircraft_type` | `not_found` | `NotFound` | 6–7-char code well-formed but absent from ACFTREF | Use `faa_search_aircraft_types` to discover valid manufacturer-model codes by name. |
 | `faa_get_aircraft_type` | `invalid_code` | `ValidationError` | Code fails domain validation — not 6–7 uppercase alphanumeric characters | Use `faa_search_aircraft_types` to discover valid manufacturer-model codes by name. |
 | `faa_get_registration_status` | `invalid_n_number` | `ValidationError` | N-number fails domain validation after normalization | Provide a valid US N-number (see `faa_lookup_registration` above). |
 | `faa_get_registration_status` | *(otherwise none — `recordType: 'unknown'` is a valid success)* | — | — | — |
+| All five tools and registration resource | `mirror_loading` | `ServiceUnavailable` (retryable) | The replacement generation has not completed | Retry after the refresh completes; rerun mirror:refresh if the rebuild was interrupted. |
 
 Exact search filters normalize trim/case in the service: `state` is two ASCII letters (including
 territories and military postal codes), `modeSCode` is six hex characters, `aircraftType` is
@@ -55,6 +56,11 @@ grammar, and queries the existing `mfr_mdl_code` index exactly. A code alone is 
 filter. Discover codes with `faa_search_aircraft_types`, search registrations by code, then
 use `faa_lookup_registration` for details; names alone can span distinct reference codes.
 
+`serialNumber` trims surrounding whitespace and compares exactly with NOCASE collation,
+using a matching index. It preserves leading zeros, punctuation, and internal spaces; a
+serial can belong to multiple manufacturers. Make/model text uses token prefixes, while
+owner text keeps whole-token matching. Both searches count and page the same visible matches.
+
 The cold-mirror case (a never-initialized index) is a service-layer `ServiceUnavailable` with
 recovery `Run the mirror:init script to build the local FAA registry index before querying.` —
 there is no live API fallback, so it surfaces loudly rather than returning an empty result.
@@ -63,7 +69,11 @@ there is no live API fallback, so it surfaces loudly rather than returning an em
 
 | URI Template | Description | Pagination |
 |:-------------|:------------|:-----------|
-| `faa://registration/{nNumber}` | Read-once full registration record for one N-number (same payload as `faa_lookup_registration`). Convenience for clients that inject resources as context; the tool is the reliable path. | None (single record) |
+| `faa://registration/{nNumber}` | Full registration record for one N-number. Shares the domain fields from `faa_lookup_registration`; snapshot notices and dates are tool enrichment. | None (single record) |
+
+The published `faa-aircraft-registry-guide` is served as
+`skill://faa-aircraft-registry-guide/SKILL.md` through the framework's Skills extension. It
+covers identifier chains, query conventions, freshness, and interpreting reassigned N-numbers.
 
 ### Prompts
 
@@ -76,9 +86,9 @@ None. This is a data/lookup server with no recurring multi-step interaction patt
 **What it wraps.** The FAA Releasable Aircraft Database — the entire US civil aircraft
 registry, published by the FAA Civil Aviation Registry (AFS-750) as a public-domain bulk
 download (`https://registry.faa.gov/database/ReleasableAircraft.zip`). The ZIP contains
-comma-delimited `.txt` files. **As of at least January 2026 the registration master is split
-into nine parts** (`MASTER-1.txt` through `MASTER-9.txt`, ~20 MB each) rather than a single
-`MASTER.txt` — the ingestor must enumerate all nine. Other files: `ACFTREF.txt` (aircraft
+comma-delimited `.txt` files. **The FAA has shipped the registration master both ways:** split
+into nine parts (`MASTER-1.txt` through `MASTER-9.txt`, ~20 MB each, January 2026) and as a
+single `MASTER.txt` (November 2026), so the ingestor accepts either layout. Other files: `ACFTREF.txt` (aircraft
 make/model/series reference), `ENGINE.txt` (engine reference), `DEREG.txt` (deregistered
 aircraft), `RESERVED.txt` (reserved N-numbers), plus `DEALER.txt` and `DOCINDEX.txt` (out of
 scope). Refreshed daily at 11:30 PM Central.
@@ -125,7 +135,8 @@ and mostly not bulk-published. The `faa-` name makes the scope obvious.
   name, street/physical address, and all co-owner (`otherNames`) fields from every output, and
   (b) **disable owner-name search** (reject `ownerName` on `faa_search_registrations`) —
   otherwise an agent could confirm "X owns aircraft Y" by probing the search input even with
-  output hidden. Aircraft facts (make/model/engine/year/specs) and registration status still
+  output hidden. Builder-identifying manufacturer values and identical kit-manufacturer
+  aliases are also withheld from output, matching, and ordering. Aircraft facts and registration status still
   flow, with `ownerRedacted: true` on every affected payload so the agent knows data was
   withheld and why. Full owner detail requires explicitly setting `FAA_REDACT_OWNER_PII=false`
   — fine for local/self-host, never the public hosted endpoint.
@@ -140,11 +151,17 @@ and mostly not bulk-published. The `faa-` name makes the scope obvious.
   returns: aircraft identity, not owner PII. Ships to npm for local use either way.
 - **Truncation disclosure + pagination.** Search tools accept `limit` and `offset`. Every
   response carries `totalCount` (via `ctx.enrich.total()`) so the agent never treats a partial
-  result set as complete; when the cap is hit, `ctx.enrich.truncated({ shown, cap, guidance })`
-  discloses the cut and names the concrete `nextOffset` to retrieve the rest. Every disclosed
+  result set as complete. When more matches remain, enrichment reports `truncated`, `shown`,
+  `cap`, and the `nextOffset` for the next page. Every disclosed
   omission therefore has a retrieval path — the ordering is total and stable across pages
-  (`registration.rowid` for registrations, `mfr, model, code` for aircraft types), so
-  sequential pages neither repeat nor skip rows.
+  (`registration.rowid` for registrations, visible manufacturer, model, and code for aircraft types),
+  so pages over an unchanged snapshot neither repeat nor skip rows. Limits default to 25 and
+  clamp to 200 with a notice, log, and counter; `FAA_CLAMP_LIMITS=false` restores strict rejection.
+- **Source date.** Successful tool responses carry optional `dataAsOf` from the selected MASTER
+  ZIP entry's DOS calendar date. Unknown dates and dates more than seven calendar days old
+  get refresh guidance, composed with search notices. The date and rows come from the same
+  read snapshot; local build time is never a substitute. The registration resource keeps its
+  domain JSON without tool enrichment.
 - **No DataCanvas.** This is a decode/search surface (find-the-record-then-drill-in over
   categorical metadata), not an analytical row set an agent would run SQL over. It fails the
   "earns its keep on shape, not size" gate. Inline results only.
@@ -155,7 +172,7 @@ and mostly not bulk-published. The `faa-` name makes the scope obvious.
 
 | Service | Wraps | Used By |
 |:--------|:------|:--------|
-| `registry-service` | The on-disk SQLite + FTS5 index built from the FAA Releasable Aircraft Database (`MASTER-1`…`MASTER-9`, `ACFTREF`, `ENGINE`, `DEREG`, `RESERVED`). Built via the framework `MirrorService` (`defineMirror` + `sqliteMirrorStore`). Owns query, join, decode, and PII redaction. | All 5 tools, the resource |
+| `registry-service` | The on-disk SQLite + FTS5 index built from the FAA Releasable Aircraft Database (`MASTER` or `MASTER-1`…`MASTER-9`, `ACFTREF`, `ENGINE`, `DEREG`, `RESERVED`). Built via the framework `MirrorService` (`defineMirror` + `sqliteMirrorStore`). Owns query, join, decode, and PII redaction. | All 5 tools, the resource |
 
 This is a **server-as-source** design — the index is the source of truth at runtime, there is
 no upstream API to retry. The framework resilience table (retry/backoff/parse-classification)
@@ -176,32 +193,35 @@ SQLite / no persistent FS) — this server targets stdio + Node/Bun HTTP, not Wo
 
 ### Ingest strategy — initialized out-of-band, refreshed daily
 
-The dataset is one ~1M-row corpus that changes daily but is queried far more than it changes —
-the canonical "mirror a bulk upstream" case. Two competing framings from the brief
-("bakes into the image" vs "MirrorService") reconcile cleanly:
+The dataset is one ~1M-row corpus that changes daily but is queried far more than it changes.
 
 - **Build the index out-of-band, never on server startup.** A `mirror:init` CLI script
-  downloads `ReleasableAircraft.zip`, parses the thirteen `.txt` files (nine MASTER parts +
-  ACFTREF + ENGINE + DEREG + RESERVED), pre-joins, and writes the SQLite file. The index is
-  not bundled with the package or baked into the image: every install path — npm, Docker,
-  `.mcpb` — ships the mirror CLI and an empty `.mirror` dir, and the operator runs `mirror:init`
-  once before first query (under Docker, via `docker exec` after the container starts). Init is
-  idempotent and resumable.
+  downloads `ReleasableAircraft.zip`, parses the `.txt` files (MASTER, single or in nine parts,
+  + ACFTREF + ENGINE + DEREG + RESERVED), pre-joins, and writes the SQLite file. The index is
+  created by running the bundled mirror CLI with `mirror:init` before the first query.
+  The Docker image provides a writable `.mirror` directory. Use `docker exec` in the
+  running container or run the CLI in a one-shot container with the same volume. An
+  interrupted initial build restarts with a new generation.
 - **Refresh on a daily schedule.** Register `mirror:refresh` on a cron via `schedulerService`
   inside `setup()` (gated to HTTP transport so stdio operators run it out-of-band), aligned to
-  the FAA's 11:30 PM Central re-release. A refresh rebuilds from the latest ZIP; an
-  interrupted rebuild that leaves the index empty surfaces `ServiceUnavailable` rather than a
-  deceptive empty result.
+  the FAA's 11:30 PM Central re-release. A refresh rebuilds from the latest ZIP; a
+  rebuild is unavailable to readers until successful completion. An interrupted rebuild
+  remains unavailable until recovery; the scheduler skips a refresh while another sync owns the lease.
 - **Validate archive names before rebuilding.** Require ACFTREF, ENGINE, DEREG and RESERVED
   plus all nine numbered MASTER parts when any numbered part appears; otherwise require
-  legacy MASTER.txt. Match basenames case-insensitively and reject unexpected numbered parts.
+  a single MASTER.txt. Match basenames case-insensitively and reject unexpected numbered parts.
   This metadata-only preflight preserves the last-good tables on manifest rejection without
-  inflating entries. Once ingestion starts, rebuilding is not atomic: a later parse, write or
-  process failure can leave partial data. Lazy inflation and bounded transactions remain in place.
-- **Read path gated on readiness and row count.** A cold (never-initialized) index, or an
-  interrupted rebuild with no records, is a hard `ServiceUnavailable` with a recovery hint to
-  run `mirror:init` or `mirror:refresh`. There is no live API fallback and no silent empty
-  result.
+  inflating entries. A loading marker commits with the wipe; generation ownership fences raw
+  auxiliary writes as well as the framework's pages. Successful terminal sync publication
+  clears the marker and publishes the source date. Lazy inflation and bounded transactions remain.
+- **Read one SQLite snapshot per request.** The loading marker, completion state, row count,
+  source date, and all result queries share one synchronous read transaction. Loading raises
+  retryable `mirror_loading`; cold and empty mirrors retain their distinct `ServiceUnavailable`
+  diagnostics. No read can combine readiness from one generation with rows from another.
+- **Manufacturer classification.** Rebuilds classify non-type-certificated and light-sport
+  manufacturer names against primary and co-owner records from MASTER and DEREG. Matching
+  MASTER corporate/government/LLC/non-citizen-corporate registrants preserve public manufacturer
+  names. Old unresolved classifications hide names conservatively under redaction until refresh.
 
 The `Dockerfile` pre-creates the writable `.mirror` data directory owned by the runtime user
 and copies `dist/` into the image, including the compiled lifecycle commands
@@ -224,19 +244,21 @@ registration row for fast single-call lookup, with FTS5 over the searchable text
   `expiration_date`, `unique_id`, `kit_mfr`, `kit_model`.
   - **FTS5 columns:** `owner_name`, `make`, `model`, `other_names`, `city`.
   - **Indexes:** `n_number` (unique), `mode_s_code_hex`, `mfr_mdl_code`, `state`,
-    `aircraft_type_code`.
+    `aircraft_type_code`, `serial_number COLLATE NOCASE`.
 - **`aircraft_ref`** (from `ACFTREF`): `code` (PK, 6–7-char), `mfr`, `model`, `aircraft_type_code`,
   `engine_type_code`, `category_code`, `builder_cert_code`, `num_engines`, `num_seats`,
-  `weight_class`, `cruise_speed`, `tc_data_sheet`, `tc_data_holder`.
+  `weight_class`, `cruise_speed`, `tc_data_sheet`, `tc_data_holder`, `manufacturer_redacted`
+  (`1` hidden, `0` classified public, `NULL` unknown on a legacy mirror).
   - **FTS5 columns:** `mfr`, `model`. **Index:** `aircraft_type_code`, `category_code`.
 - **`engine_ref`** (from `ENGINE`): `code` (PK, 5-char), `mfr`, `model`, `engine_type_code`,
   `horsepower`, `thrust`.
 - **`dereg`** (from `DEREG`, status-resolution only — not searched): `n_number` (indexed),
-  `serial_number`, `mfr_mdl_code`, `status_code`, `cancel_date`, `mode_s_code_hex`, plus
+  `serial_number`, `mfr_mdl_code`, `status_code`, `cancel_date`, `mode_s_code_hex`, `export_country`, `year_mfr`, plus
   mailing-address fields (`owner_name`, `street`, `street2`, `city`, `state`, `zip`) and a
   separate physical-address block (`physical_address`, `physical_address2`, `physical_city`,
   `physical_state`, `physical_zip`, `physical_county`, `physical_country`) — all
-  redaction-gated. Both address blocks must be scrubbed by the redaction gate.
+  never returned by the status/history tool. Co-owner fields are consumed for manufacturer
+  classification without adding persistent owner data.
 - **`reserved`** (from `RESERVED`, status-resolution only): `n_number` (indexed),
   `type_reservation_code`, `reserve_date`, `expiration_notice_date`, `purge_date`,
   `n_number_for_change`, plus registrant/address fields (redaction-gated).
@@ -244,6 +266,10 @@ registration row for fast single-call lookup, with FTS5 over the searchable text
 Decode tables (status code, type-registrant, type-aircraft, type-engine, region, category,
 builder-cert, airworthiness class, reservation type, weight class) are small static maps in code, applied at
 query time — see Appendix. They are not stored in the index.
+Approved operations decode using the airworthiness class, preserving order, unknown codes,
+and the existing raw field. Lookup joins the engine reference's horsepower and thrust per engine;
+zero ratings remain absent. Cancellation history joins aircraft reference data through the same
+manufacturer-visibility rule and orders equal dates by stable ingestion order, with undated rows last.
 `faa_get_aircraft_type` preserves raw `weightClass` and adds optional `weightClassLabel`:
 maximum gross takeoff weight up to 12,499 lb (CLASS 1), 12,500–19,999 lb (CLASS 2),
 20,000 lb and over (CLASS 3), or UAV up to 55 lb (CLASS 4). Unknown raw classes retain
@@ -255,7 +281,8 @@ their value without a label; blank or missing classes omit both fields.
 
 | Env Var | Required | Description |
 |:--------|:---------|:------------|
-| `FAA_REDACT_OWNER_PII` | No (defaults to `true` / redacted) | Fail-safe owner-PII redaction. When `true`/unset/malformed: drop registrant name, street/physical address, and co-owner names from all output, and disable owner-name search. Set to `false` only on trusted local/self-host installs to expose full owner detail. Parse with `z.stringbool().default(true)`. |
+| `FAA_REDACT_OWNER_PII` | No (defaults to `true` / redacted) | Fail-safe owner-PII redaction. When `true`/unset/malformed: withhold owner identity and classified builder names, and disable owner-name search. Set to `false` only on trusted local/self-host installs to expose full owner detail. Normalize unrecognized values to `true` before `z.stringbool()`. |
+| `FAA_CLAMP_LIMITS` | No (defaults to `true`) | Clamp search limits above 200 with a notice, log, and counter. `false` restores the advertised and enforced maximum. Parse explicitly with `z.stringbool()`. |
 | `FAA_MIRROR_PATH` | No (defaults to `.mirror/faa-registry.db`) | Filesystem path to the SQLite index file. Mount a volume here in production; the Docker image pre-creates the parent dir owned by the runtime user. |
 | `FAA_DATABASE_URL` | No (defaults to the FAA registry ZIP URL) | Source URL for `ReleasableAircraft.zip`, used by `mirror:init` / `mirror:refresh`. Overridable for a private/cached mirror; never read at request time. |
 
@@ -266,20 +293,21 @@ Goes in `src/config/server-config.ts` as its own Zod schema, lazy-parsed via `pa
 
 ## Implementation Order
 
-1. **Config + server setup** — `server-config.ts` (the three env vars above); `createApp()`
+1. **Config + server setup** — `server-config.ts` (the env vars above); `createApp()`
    with `name`/`title` both set to `faa-aircraft-registry-mcp-server` (machine name on every
    surface — never a Title Case display name) and a short `instructions` string noting the
    offline/keyless nature and the redaction default.
 2. **`registry-service`** — `defineMirror` + `sqliteMirrorStore` schema; the `sync` ingester
    (download ZIP → parse MASTER parts and reference/status files → pre-join → yield rows); decode maps; the
-   N-number normalizer; the redaction gate (single chokepoint that strips PII fields and
-   flips `ownerRedacted`). Mirror lifecycle CLI scripts (`mirror:init/refresh/verify`) +
+   N-number normalizer; coordinated output and search redaction. `registry-mirror` binds
+   ingest writes to the sync lease, and `registry-snapshot` pins each read to one generation.
+   Mirror lifecycle CLI scripts (`mirror:init/refresh/verify`) +
    `src/cli/_mirror-context.ts`; compile them to `dist/cli/` for npm, MCPB, and Docker;
    wire daily `mirror:refresh` via `schedulerService` in `setup()`.
 3. **Read-only tools** — `faa_lookup_registration`, `faa_get_aircraft_type` (the two exact-key
    lookups) first; then `faa_search_registrations`, `faa_search_aircraft_types` (FTS5); then
    `faa_get_registration_status` (multi-file resolution).
-4. **Resource** — `faa://registration/{nNumber}` (reuses the lookup handler).
+4. **Resource** — `faa://registration/{nNumber}` (shares the registry service and record schema).
 5. **Tests** — `createMockContext`; cover N-number normalization (with/without N, lowercase),
    the redaction gate in both modes (default-redacted *and* opt-in full), a known
    active/deregistered/reserved status split, capped-search truncation disclosure, and a sparse
@@ -299,15 +327,15 @@ a definitive answer instead of a not-found for a known-but-inactive number.
 | # | Lookup | Purpose | Result |
 |:--|:-------|:--------|:-------|
 | 1 | `registration` table by `n_number` | Active registration? | `recordType: 'active'` → status + airworthiness + expiry |
-| 2 | `dereg` table by `n_number` | Previously registered, now cancelled? | `recordType: 'deregistered'` → status code + cancel date |
-| 3 | `reserved` table by `n_number` | Reserved but not yet registered? | `recordType: 'reserved'` → reservation type + reserve/purge dates |
-| — | none matched | Number never issued | `recordType: 'unknown'` (not an error — a valid, informative answer) |
+| 2 | `reserved` table by `n_number` | Current reservation? | `recordType: 'reserved'` → reservation type + reserve/purge dates |
+| 3 | `dereg` table by `n_number` | Cancellation history only? | `recordType: 'deregistered'` → latest cancellation fields |
+| — | none matched | Number absent from this snapshot | `recordType: 'unknown'` (a valid answer) |
 
 The cross-file order matters: an N-number can legitimately appear in `dereg` (cancelled) and
 later be re-issued in `reserved` or `registration`; active (MASTER) wins, so it is checked
-first. This drives the service method shape (one method, three indexed point-lookups,
-short-circuit on first hit) and the output schema (a discriminated union keyed on `recordType`,
-each branch validated separately so `format()`-parity holds per branch).
+first, followed by current reservations. Every branch can carry available `cancellations`,
+newest first, without changing current-state precedence. An N-number can have belonged to
+different airframes: history is associated with the number, not presumed to describe one aircraft.
 
 ---
 
@@ -322,8 +350,8 @@ each branch validated separately so `format()`-parity holds per branch).
   human web portal (verified read-only). Public domain (US Government work), daily-refreshed
   comma-delimited `.txt` files in one ZIP. The corpus changes daily but is queried far more
   than it changes — textbook "mirror a bulk upstream instead of paginating it live." **Note:**
-  the registration master is split across `MASTER-1.txt`…`MASTER-9.txt` (confirmed Jan 2026);
-  the ingestor concatenates all nine parts.
+  the registration master has shipped both as `MASTER-1.txt`…`MASTER-9.txt` (Jan 2026) and as a
+  single `MASTER.txt` (Nov 2026); the ingestor reads either, concatenating numbered parts.
 - **Backend = MirrorService SQLite + FTS5, not in-memory, not external.** Corpus (~300k active
   + several-hundred-k deregistered + reference tables ≈ 10⁶ rows) is mid-tier: too large for a
   comfortable in-memory rebuild-per-process, far below an external store. SQLite delivers the
@@ -375,10 +403,10 @@ each branch validated separately so `format()`-parity holds per branch).
 
 ## Known Limitations
 
-- **MASTER file is split into nine parts.** As of at least January 2026 the ZIP contains
-  `MASTER-1.txt` through `MASTER-9.txt` rather than a single `MASTER.txt`. The ingestor must
-  enumerate all nine parts. Archive preflight rejects an incomplete or unexpected numbered
-  set before changing tables; legacy MASTER.txt is accepted only when no numbered parts appear.
+- **MASTER file layout varies.** The FAA has shipped the master as nine parts
+  (`MASTER-1.txt` through `MASTER-9.txt`, January 2026) and as a single `MASTER.txt`
+  (November 2026). Archive preflight rejects an incomplete or unexpected numbered set before
+  changing tables; a single MASTER.txt is accepted only when no numbered parts appear.
 - **FAA Reauthorization Act 2024 §803 PII opt-out (status: pending final rule).** Since
   April 2025 private aircraft owners may request removal of their name/address from FAA
   public-facing systems. The web portal already blanks opted-out records; whether and when the
@@ -398,10 +426,9 @@ each branch validated separately so `format()`-parity holds per branch).
   cruise speed, co-owner names, kit fields, and others are legitimately empty on many records.
   Schemas mark these optional; `format()` and normalization preserve the gap (never fabricate a
   value from a blank upstream field).
-- **Up to ~24h staleness.** The index refreshes daily against the FAA's nightly re-release; a
-  registration filed today may not appear until the next refresh. The FAA also publishes daily
-  incremental files — out of scope for v1 (full daily rebuild is simpler and the corpus is
-  small enough).
+- **Snapshot freshness depends on refresh.** HTTP normally refreshes daily; a failed refresh or
+  an operator-managed stdio index can be older. `dataAsOf` reports the source date where known,
+  and a date more than seven days old gets a refresh notice. It is not a live eligibility check.
 - **Redacted hosted endpoint withholds owner data by design.** On the public endpoint
   (`FAA_REDACT_OWNER_PII=true`), owner name/address and owner-name search are unavailable. This
   is intentional, not a bug; `ownerRedacted: true` flags it. Full detail requires a local
@@ -415,10 +442,8 @@ Source: FAA `ardata.pdf` (Aircraft Registration Master File data dictionary, rev
 All files are comma-delimited; fixed positions below are from the spec (the data ships with
 header rows and trailing commas). Decode maps are applied at query time.
 
-**File set as of Jan 2026:** `MASTER-1.txt`…`MASTER-9.txt` (nine parts, same schema, same
-header row per part), `ACFTREF.txt`, `ENGINE.txt`, `DEREG.txt`, `RESERVED.txt`. The ingestor
-enumerates all nine MASTER parts and concatenates them; checking for `MASTER.txt` by exact
-name will fail.
+**File set:** `MASTER.txt` or all nine `MASTER-1.txt`…`MASTER-9.txt` parts, plus `ACFTREF.txt`,
+`ENGINE.txt`, `DEREG.txt`, and `RESERVED.txt`. The ingester accepts either complete layout.
 
 ### MASTER-{1..9}.txt (active registrations — 34 fields, 612-char record per row)
 
@@ -501,8 +526,10 @@ the full table from the spec.
 **Airworthiness Classification (CERTIFICATION char 1):** 1 Standard · 2 Limited · 3 Restricted ·
 4 Experimental · 5 Provisional · 6 Multiple · 7 Primary · 8 Special Flight Permit · 9 Light
 Sport. (Approved-operation sub-codes that follow depend on the class — Standard uses N/U/A/T/
-G/B/C/O; Restricted/Experimental use 0–9 + light-sport/UAS variants. Surface the raw operations
-string; decode the class char as the primary signal.)
+G/B/C/O; Restricted/Experimental and the other classes use their own tables. Preserve the raw
+operations string and decode ordered tokens using the class. Experimental `8A`–`8C` and
+`9A`–`9E` are two-character tokens; Multiple uses two class positions followed by restricted
+operation codes. Unknown or ambiguous tokens retain their code without a fabricated label.)
 
 **Aircraft Category (ACFTREF AC-CAT):** 1 Land · 2 Sea · 3 Amphibian.
 

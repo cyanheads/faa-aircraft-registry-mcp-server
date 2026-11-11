@@ -41,6 +41,8 @@ const ServerConfigSchema = z.object({
   redactOwnerPii: z
     .preprocess(redactToSafeDefault, z.stringbool())
     .describe('Fail-safe owner-PII redaction. Redacted unless explicitly set to a falsy value.'),
+  /** Accept oversized search limits and clamp them to the page ceiling. */
+  clampLimits: z.stringbool().default(true),
   /** Filesystem path to the SQLite mirror index file. */
   mirrorPath: z
     .string()
@@ -63,6 +65,7 @@ let _config: ServerConfig | undefined;
 export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     redactOwnerPii: 'FAA_REDACT_OWNER_PII',
+    clampLimits: 'FAA_CLAMP_LIMITS',
     mirrorPath: 'FAA_MIRROR_PATH',
     databaseUrl: 'FAA_DATABASE_URL',
   });

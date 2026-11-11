@@ -6,6 +6,7 @@
  * @module lifecycle
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { logger, schedulerService } from '@cyanheads/mcp-ts-core/utils';
 import { getRegistryService } from './services/registry/registry-service.js';
 
@@ -27,8 +28,22 @@ export async function scheduleDailyRefresh(): Promise<void> {
     REFRESH_CRON,
     async (jobCtx) => {
       logger.info('Starting scheduled FAA registry refresh', jobCtx);
-      const result = await getRegistryService().mirrorInstance.runSync({ mode: 'refresh' });
-      logger.info(`Scheduled FAA registry refresh complete: ${result.total} records`, jobCtx);
+      try {
+        const result = await getRegistryService().mirrorInstance.runSync({ mode: 'refresh' });
+        logger.info(`Scheduled FAA registry refresh complete: ${result.total} records`, jobCtx);
+      } catch (error) {
+        if (
+          !(error instanceof McpError) ||
+          error.code !== JsonRpcErrorCode.Conflict ||
+          error.data?.reason !== 'sync_locked'
+        ) {
+          throw error;
+        }
+        logger.info(
+          'Skipping scheduled FAA registry refresh: another sync holds the lease',
+          jobCtx,
+        );
+      }
     },
     'Daily full rebuild of the FAA registry index from the latest Releasable Aircraft Database ZIP.',
   );
@@ -43,9 +58,8 @@ export async function scheduleDailyRefresh(): Promise<void> {
  * in which a tick fires against a closed database.
  *
  * The job lookup is a presence check, not a guard against an impossible state:
- * stdio never schedules the cron at all, and `scheduleDailyRefresh()` is
- * fire-and-forget under HTTP, so a fast shutdown can arrive before it has
- * registered. `schedulerService.remove()` throws `NotFound` in both cases.
+ * stdio never schedules the cron, and `schedulerService.remove()` throws
+ * `NotFound` for an absent job.
  */
 export async function teardownServer(): Promise<void> {
   if (schedulerService.listJobs().some((job) => job.id === REFRESH_JOB_ID)) {

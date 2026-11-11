@@ -3,7 +3,7 @@
  * a handful of registration rows plus reference (ACFTREF/ENGINE) and status
  * (DEREG/RESERVED) rows, exercising the query/join/decode/redaction path without
  * the multi-hundred-MB real corpus. Writes the same schema the production mirror
- * uses (framework `buildSchemaSql` + the server's auxiliary-table migration) and
+ * uses (including its migrations) and
  * marks the sync state complete so `mirror.ready()` returns true.
  * @module tests/fixtures/build-fixture-db
  */
@@ -11,7 +11,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildSchemaSql, openSqliteHandle } from '@cyanheads/mcp-ts-core/mirror';
+import { sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
 import { registrationStoreSpec } from '@/services/registry/schema.js';
 
 /** Create a temp DB path under the OS temp dir (unique per call). */
@@ -34,13 +34,8 @@ export function tempDbPath(): string {
  * preserved as a real value, cruise_speed = 0 blanked), ENGINE 41514 (Lycoming).
  */
 export async function buildFixtureDb(path: string): Promise<void> {
-  const spec = registrationStoreSpec(path);
-  const handle = await openSqliteHandle(path, { busyTimeoutMs: 5000 });
-
-  // Primary table + FTS + sync_state, exactly as the production mirror builds it.
-  handle.exec(buildSchemaSql(spec));
-  // Auxiliary reference/status tables (the server's migration content).
-  for (const migration of spec.migrations ?? []) migration.up(handle);
+  const store = sqliteMirrorStore(registrationStoreSpec(path));
+  const handle = await store.raw();
 
   handle.transaction(() => {
     const reg = handle.prepare(
@@ -387,6 +382,9 @@ export async function buildFixtureDb(path: string): Promise<void> {
         null,
       );
 
+    // These synthetic aircraft reference names are public in the complete fixture.
+    handle.exec('UPDATE aircraft_ref SET manufacturer_redacted = 0');
+
     // Mark the mirror complete so ready() is true (total = registration row count).
     handle
       .prepare(
@@ -397,5 +395,5 @@ export async function buildFixtureDb(path: string): Promise<void> {
       .run(new Date().toISOString(), 4, new Date().toISOString());
   });
 
-  handle.close();
+  await store.close();
 }

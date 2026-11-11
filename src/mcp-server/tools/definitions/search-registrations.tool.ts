@@ -11,13 +11,25 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getRegistryService } from '@/services/registry/registry-service.js';
+import { mirrorLoadingError } from '../../_mirror-errors.js';
 import { codedValueSchema } from './_schemas.js';
+import {
+  applySearchLimit,
+  enrichSearchPage,
+  searchEnrichment,
+  searchLimitSchema,
+} from './_search-page.js';
 
 const registrationSummarySchema = z
   .object({
     nNumber: z.string().describe('Normalized N-number without the leading "N".'),
     nNumberDisplay: z.string().describe('N-number with the leading "N" for display.'),
+    serialNumber: z
+      .string()
+      .optional()
+      .describe('Manufacturer serial number as stored by the FAA.'),
     make: z.string().optional().describe('Aircraft manufacturer name.'),
     manufacturerModelCode: z
       .string()
@@ -44,7 +56,7 @@ const registrationSummarySchema = z
 export const searchRegistrationsTool = tool('faa_search_registrations', {
   title: 'faa-aircraft-registry-mcp-server: search registrations',
   description:
-    'Search active US civil aircraft registrations by owner name, make/model, exact manufacturerModelCode, state, aircraft type, or Mode S (hex) code. Discover codes with faa_search_aircraft_types, search registrations by manufacturerModelCode, then drill into N-numbers via faa_lookup_registration. Filters are AND-combined; at least one is required. Owner-name search is unavailable when this deployment redacts owner PII — use the other filters instead. Every response reports totalCount (all matches, not just this page); when more remain, it returns nextOffset — pass it back as offset to page forward.',
+    'Search active US civil aircraft registrations by owner name, make/model, exact manufacturerModelCode, serial number, state, aircraft type, or Mode S (hex) code. Discover codes with faa_search_aircraft_types and get full records with faa_lookup_registration. Filters are AND-combined and at least one is required. Owner-name search is available on deployments that expose owner PII. Responses report totalCount across all pages and return nextOffset when more matches remain.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -52,7 +64,18 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       .string()
       .optional()
       .describe('Registrant name to match (full-text). Rejected when owner-PII redaction is on.'),
-    makeModel: z.string().optional().describe('Aircraft make and/or model to match (full-text).'),
+    makeModel: z
+      .string()
+      .optional()
+      .describe(
+        'Aircraft make or model. Each search term matches a token prefix, such as 172 matching 172S.',
+      ),
+    serialNumber: z
+      .string()
+      .optional()
+      .describe(
+        'Exact manufacturer serial number, trimmed and matched case-insensitively. Leading zeros, punctuation, and internal spaces are significant. Blank is unset. Use manufacturerModelCode or makeModel to narrow duplicate serials.',
+      ),
     manufacturerModelCode: z
       .string()
       .optional()
@@ -77,13 +100,7 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       .describe(
         'Six hexadecimal characters for the Mode S code (ICAO 24-bit address), exact match. Trimmed and uppercased; blank is unset.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(200)
-      .default(25)
-      .describe('Maximum number of results to return (1–200, default 25).'),
+    limit: searchLimitSchema,
     offset: z
       .number()
       .int()
@@ -100,35 +117,10 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       .describe('Matching registration summaries for this page (up to limit).'),
   }),
 
-  enrichment: {
-    totalCount: z
-      .number()
-      .describe('Total registrations matching the filters, across all pages. Always present.'),
-    nextOffset: z
-      .number()
-      .optional()
-      .describe(
-        'Offset to request the next page; absent when this page reached the end of the matches.',
-      ),
-    truncated: z
-      .boolean()
-      .optional()
-      .describe('Present and true only when matches remain beyond this page.'),
-    shown: z
-      .number()
-      .optional()
-      .describe('Number of results on this page (present only when truncated is set).'),
-    cap: z
-      .number()
-      .optional()
-      .describe('The limit that was applied (present only when truncated is set).'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Guidance when no registrations matched, or when more matches remain.'),
-  },
+  enrichment: searchEnrichment,
 
   errors: [
+    mirrorLoadingError,
     {
       reason: 'invalid_code',
       thrownBy: 'service',
@@ -164,14 +156,14 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'ownerName was supplied while owner-PII redaction is enabled on this deployment.',
       recovery:
-        'Drop the ownerName filter — owner-name search is disabled here. Search by makeModel, manufacturerModelCode, state, aircraftType, or modeSCode instead.',
+        'Drop the ownerName filter. Search by makeModel, manufacturerModelCode, serialNumber, state, aircraftType, or modeSCode.',
     },
     {
       reason: 'no_filters',
       code: JsonRpcErrorCode.ValidationError,
       when: 'No search filter was supplied.',
       recovery:
-        'Provide at least one of makeModel, manufacturerModelCode, state, aircraftType, or modeSCode (or ownerName when owner PII is unredacted).',
+        'Provide at least one of makeModel, manufacturerModelCode, serialNumber, state, aircraftType, or modeSCode (or ownerName when owner PII is unredacted).',
     },
   ],
 
@@ -185,6 +177,7 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
 
     const makeModel = input.makeModel?.trim() || undefined;
     const manufacturerModelCode = input.manufacturerModelCode?.trim() || undefined;
+    const serialNumber = input.serialNumber?.trim() || undefined;
     const state = input.state?.trim() || undefined;
     const aircraftType = input.aircraftType?.trim() || undefined;
     const modeSCode = input.modeSCode?.trim() || undefined;
@@ -193,6 +186,7 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       !ownerName &&
       !makeModel &&
       !manufacturerModelCode &&
+      !serialNumber &&
       !state &&
       !aircraftType &&
       !modeSCode
@@ -200,40 +194,35 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       throw ctx.fail('no_filters', 'At least one search filter is required.');
     }
 
+    const { limit, notice } = applySearchLimit(ctx, 'faa_search_registrations', input.limit);
+    let dataAsOf: string | undefined;
     const page = await service.searchRegistrations(
       {
         ...(ownerName ? { ownerName } : {}),
         ...(makeModel ? { makeModel } : {}),
         ...(manufacturerModelCode ? { manufacturerModelCode } : {}),
+        ...(serialNumber ? { serialNumber } : {}),
         ...(state ? { state } : {}),
         ...(aircraftType ? { aircraftType } : {}),
         ...(modeSCode ? { modeSCode } : {}),
-        limit: input.limit,
+        limit,
         offset: input.offset,
       },
       ctx,
+      (snapshot) => {
+        dataAsOf = snapshot.dataAsOf;
+      },
     );
 
-    // Always populated — a required enrichment field must survive every success
-    // path, including the zero-result one.
-    ctx.enrich.total(page.totalCount);
-    const nextOffset = input.offset + page.items.length;
-    if (page.truncated) ctx.enrich({ nextOffset });
-
-    if (page.items.length === 0) {
-      ctx.enrich.notice(
-        page.totalCount > 0
-          ? `Offset ${input.offset} is past the end of this result set — ${page.totalCount} registrations match, but none remain at that offset. Retry with a lower offset.`
-          : 'No registrations matched the supplied filters. Broaden the make/model terms, discover manufacturerModelCode with faa_search_aircraft_types, verify the state or Mode S code, or remove a filter.',
-      );
-    }
-    if (page.truncated) {
-      ctx.enrich.truncated({
-        shown: page.items.length,
-        cap: page.cap,
-        guidance: `Showing ${page.items.length} of ${page.totalCount} matching registrations. Call faa_search_registrations again with the same filters and offset: ${nextOffset} for the next page.`,
-      });
-    }
+    enrichSearchPage(
+      ctx,
+      'faa_search_registrations',
+      page,
+      input.offset,
+      dataAsOf,
+      notice,
+      'No registrations matched the supplied filters. Broaden the make/model terms, discover manufacturerModelCode with faa_search_aircraft_types, verify the state or Mode S code, or remove a filter.',
+    );
 
     return { registrations: page.items };
   },
@@ -248,19 +237,21 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
     for (const r of result.registrations) {
       const makeModel = [r.yearManufactured?.toString(), r.make, r.model].filter(Boolean).join(' ');
       lines.push(
-        `### ${r.nNumberDisplay} (N-number: ${r.nNumber})${makeModel ? ` — ${makeModel}` : ''}`,
+        `### ${escapeMarkdownInline(r.nNumberDisplay)} (N-number: ${escapeMarkdownInline(r.nNumber)})${makeModel ? ` — ${escapeMarkdownInline(makeModel)}` : ''}`,
       );
       const facts: string[] = [];
-      if (r.manufacturerModelCode) facts.push(`Mfr/model code: ${r.manufacturerModelCode}`);
+      if (r.serialNumber) facts.push(`Serial: ${escapeMarkdownInline(r.serialNumber)}`);
+      if (r.manufacturerModelCode)
+        facts.push(`Mfr/model code: ${escapeMarkdownInline(r.manufacturerModelCode)}`);
       const type = coded(r.aircraftType);
-      if (type) facts.push(`Type: ${type}`);
+      if (type) facts.push(`Type: ${escapeMarkdownInline(type)}`);
       const status = coded(r.status);
-      if (status) facts.push(`Status: ${status}`);
-      if (r.state) facts.push(`State: ${r.state}`);
-      if (r.modeSCodeHex) facts.push(`Mode S: ${r.modeSCodeHex}`);
+      if (status) facts.push(`Status: ${escapeMarkdownInline(status)}`);
+      if (r.state) facts.push(`State: ${escapeMarkdownInline(r.state)}`);
+      if (r.modeSCodeHex) facts.push(`Mode S: ${escapeMarkdownInline(r.modeSCodeHex)}`);
       if (facts.length > 0) lines.push(facts.join(' | '));
       lines.push(`Owner redacted (ownerRedacted): ${r.ownerRedacted ? 'yes' : 'no'}`);
-      if (r.ownerName) lines.push(`Owner: ${r.ownerName}`);
+      if (r.ownerName) lines.push(`Owner: ${escapeMarkdownInline(r.ownerName)}`);
       else if (r.ownerRedacted) lines.push('_Owner: redacted on this deployment_');
     }
     return [{ type: 'text', text: lines.join('\n') }];

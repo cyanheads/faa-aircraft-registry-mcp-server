@@ -12,12 +12,22 @@
   "repository": "https://github.com/cyanheads/faa-aircraft-registry-mcp-server",
   "license": "Apache-2.0",
   "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "userConfig": {
+    "faa_clamp_limits": {
+      "type": "string",
+      "title": "Clamp search page sizes",
+      "description": "Clamp search page sizes above 200 by default. Set to false to reject larger limits.",
+      "default": "true",
+      "required": false
+    }
+  },
   "mcpServers": {
     "faa-aircraft-registry-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/faa-aircraft-registry-mcp-server"],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "FAA_CLAMP_LIMITS": "${user_config.faa_clamp_limits}"
       }
     }
   }

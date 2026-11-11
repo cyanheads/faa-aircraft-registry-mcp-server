@@ -19,7 +19,8 @@
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
-        "FAA_REDACT_OWNER_PII": "${user_config.faa_redact_owner_pii}"
+        "FAA_REDACT_OWNER_PII": "${user_config.faa_redact_owner_pii}",
+        "FAA_CLAMP_LIMITS": "${user_config.faa_clamp_limits}"
       }
     }
   },
@@ -33,6 +34,13 @@
       "type": "string",
       "title": "Redact owner PII",
       "description": "Redact registrant name/address and disable owner-name search. Keep 'true' (the safe default) for shared use; set 'false' only on a trusted personal install to expose full owner detail.",
+      "default": "true",
+      "required": false
+    },
+    "faa_clamp_limits": {
+      "type": "string",
+      "title": "Clamp search page sizes",
+      "description": "Clamp search page sizes above 200 by default. Set to false to reject larger limits.",
       "default": "true",
       "required": false
     }

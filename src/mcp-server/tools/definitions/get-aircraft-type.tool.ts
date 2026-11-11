@@ -8,7 +8,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getRegistryService } from '@/services/registry/registry-service.js';
+import { mirrorLoadingError } from '../../_mirror-errors.js';
+import { enrichSnapshot, snapshotEnrichment } from './_response-metadata.js';
 import { codedValueSchema, renderCoded } from './_schemas.js';
 
 export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
@@ -69,7 +72,10 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
     typeCertificateDataHolder: z.string().optional().describe('Type-certificate data holder.'),
   }),
 
+  enrichment: snapshotEnrichment,
+
   errors: [
+    mirrorLoadingError,
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
@@ -89,16 +95,22 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
 
   async handler(input, ctx) {
     const service = getRegistryService();
-    const record = await service.getAircraftType(input.code, ctx);
+    let dataAsOf: string | undefined;
+    const record = await service.getAircraftType(input.code, ctx, (snapshot) => {
+      dataAsOf = snapshot.dataAsOf;
+    });
     if (!record) {
       throw ctx.fail('not_found', `No aircraft reference record for code "${input.code}".`);
     }
+    enrichSnapshot(ctx, dataAsOf);
     return record;
   },
 
   format: (r) => {
-    const lines: string[] = [`## ${[r.manufacturer, r.model].filter(Boolean).join(' ') || r.code}`];
-    lines.push(`**Code:** ${r.code}`);
+    const lines: string[] = [
+      `## ${escapeMarkdownInline([r.manufacturer, r.model].filter(Boolean).join(' ') || r.code)}`,
+    ];
+    lines.push(`**Code:** ${escapeMarkdownInline(r.code)}`);
     const push = (line?: string) => {
       if (line) lines.push(line);
     };
@@ -108,12 +120,14 @@ export const getAircraftTypeTool = tool('faa_get_aircraft_type', {
     push(renderCoded('Builder certification', r.builderCertification));
     if (r.numberOfEngines !== undefined) lines.push(`**Engines:** ${r.numberOfEngines}`);
     if (r.numberOfSeats !== undefined) lines.push(`**Seats:** ${r.numberOfSeats}`);
-    if (r.weightClass) lines.push(`**Weight class:** ${r.weightClass}`);
-    if (r.weightClassLabel) lines.push(`**Weight class range:** ${r.weightClassLabel}`);
+    if (r.weightClass) lines.push(`**Weight class:** ${escapeMarkdownInline(r.weightClass)}`);
+    if (r.weightClassLabel)
+      lines.push(`**Weight class range:** ${escapeMarkdownInline(r.weightClassLabel)}`);
     if (r.cruiseSpeedMph !== undefined) lines.push(`**Cruise speed:** ${r.cruiseSpeedMph} mph`);
-    if (r.typeCertificateDataSheet) lines.push(`**TC data sheet:** ${r.typeCertificateDataSheet}`);
+    if (r.typeCertificateDataSheet)
+      lines.push(`**TC data sheet:** ${escapeMarkdownInline(r.typeCertificateDataSheet)}`);
     if (r.typeCertificateDataHolder)
-      lines.push(`**TC data holder:** ${r.typeCertificateDataHolder}`);
+      lines.push(`**TC data holder:** ${escapeMarkdownInline(r.typeCertificateDataHolder)}`);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

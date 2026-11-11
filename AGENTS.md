@@ -2,9 +2,9 @@
 
 **Server:** faa-aircraft-registry-mcp-server
 **Version:** 0.1.12
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1 (protocol revisions 2026-07-28 and 2025-*)
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0 (protocol revisions 2026-07-28 and 2025-*)
 **Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -17,7 +17,9 @@ An offline lookup server for the US civil aircraft registry. It indexes the FAA'
 
 **Server-as-source.** The mirror is the source of truth at runtime; there is no upstream API to retry. The index is built out-of-band by `mirror:init` (never on startup) and refreshed daily; a cold (never-initialized) index is a hard `ServiceUnavailable`, not a silent empty result. See the `api-mirror` skill for the MirrorService model.
 
-**Owner-PII redaction is a first-class, fail-safe feature.** `FAA_REDACT_OWNER_PII` defaults to redacted; unset/empty/malformed resolves to redacted. When redacted, owner name/address are dropped from output AND owner-name search is disabled. The redaction gate (a single chokepoint in `registry-service`) and the baked `.mirror/` data are load-bearing — do not weaken either.
+**Owner-PII redaction is a first-class, fail-safe feature.** `FAA_REDACT_OWNER_PII` defaults to redacted; unset/empty/malformed resolves to redacted. Owner name/address are dropped from output AND owner-name search is disabled. Ingest classifies manufacturer names against registrant identities; `registry-search` excludes hidden manufacturers from matching, counts, and ordering, and `registry-service` withholds them and repeated kit-manufacturer aliases from output. Legacy unclassified non-type-certificated manufacturers fail closed until refresh. Preserve both the matching and output gates.
+
+**Reads and rebuilds share a generation contract.** `registry-snapshot` checks readiness, source date, and query data in one SQLite read transaction. `registry-mirror` carries the framework sync lease into raw ingest writes; the generation stays loading from the table wipe until the fenced terminal sync commit. Stop older writers before upgrading a shared mirror. Never serve partial rebuilds or replace the FAA archive date with local completion time.
 
 ---
 
@@ -133,6 +135,7 @@ const ServerConfigSchema = z.object({
   redactOwnerPii: z
     .preprocess(redactToSafeDefault, z.stringbool())
     .describe('Fail-safe owner-PII redaction. Redacted unless explicitly set to a falsy value.'),
+  clampLimits: z.stringbool().default(true),
   mirrorPath: z.string().min(1).default('.mirror/faa-registry.db')
     .describe('Filesystem path to the SQLite registry index.'),
   databaseUrl: z.string().url().default('https://registry.faa.gov/database/ReleasableAircraft.zip')
@@ -143,6 +146,7 @@ let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     redactOwnerPii: 'FAA_REDACT_OWNER_PII',
+    clampLimits: 'FAA_CLAMP_LIMITS',
     mirrorPath: 'FAA_MIRROR_PATH',
     databaseUrl: 'FAA_DATABASE_URL',
   });
@@ -166,9 +170,9 @@ await createApp({
   resources: allResourceDefinitions,
   instructions: 'Offline, keyless lookup of the US civil aircraft registry … The index must be built once via the mirror:init script before queries succeed.',
   sessionMode: 'stateless',
-  setup(core) {
+  async setup(core) {
     initRegistryService({ /* redactOwnerPii, mirrorPath, databaseUrl */ });
-    if (core.config.mcpTransportType === 'http') void scheduleDailyRefresh(); // daily mirror:refresh
+    if (core.config.mcpTransportType === 'http') await scheduleDailyRefresh(); // daily mirror:refresh
   },
   teardown: teardownServer,                   // src/lifecycle.ts
 });
@@ -222,7 +226,7 @@ async handler(input, ctx) {
 }
 ```
 
-The cold-mirror case (a never-initialized index) is a service-layer `ServiceUnavailable` raised in `registry-service`, common to every tool — its recovery hint points to `mirror:init`. There is no live API fallback, so it surfaces loudly rather than returning an empty result.
+Every tool and the registration resource can return service-layer `ServiceUnavailable` reasons `mirror_not_ready`, `mirror_empty`, and `mirror_loading`. The loading reason also has an explicit retryable error contract. `registry-snapshot` raises these inside the read transaction; an interrupted rebuild requires a successful refresh. There is no live API fallback.
 
 `InvalidParams` is reserved for malformed JSON-RPC parameter shape rejected at the schema boundary. Post-Zod domain checks — malformed N-numbers, malformed manufacturer/model codes, missing search filters, and redaction-gated owner searches — use `ValidationError`.
 
@@ -256,11 +260,14 @@ src/
   index.ts                              # createApp() entry; identity, sessionMode, setup/teardown wiring
   lifecycle.ts                          # daily refresh cron (HTTP) + teardown: remove job, close mirror handle
   config/
-    server-config.ts                    # FAA_REDACT_OWNER_PII / FAA_MIRROR_PATH / FAA_DATABASE_URL (Zod schema)
+    server-config.ts                    # redaction, limit clamping, mirror path and source URL (Zod schema)
   services/
     registry/
-      registry-service.ts               # MirrorService instance; query/join/decode + the PII redaction gate
-      ingest.ts                         # sync ingester: download ZIP → parse MASTER-1..9 + ACFTREF/ENGINE/DEREG/RESERVED → pre-join
+      registry-service.ts               # lookup/status queries and domain mapping with output redaction
+      registry-search.ts                # SQL/FTS search, exact serial filter and manufacturer matching gate
+      registry-mirror.ts                # mirror construction and raw-writer lease binding
+      registry-snapshot.ts              # transactional readiness, source date and query snapshot
+      ingest.ts                         # sync ingester: download ZIP → parse MASTER (single or MASTER-1..9) + ACFTREF/ENGINE/DEREG/RESERVED → pre-join
       zip.ts  csv.ts                     # ZIP extraction + comma-delimited parsing
       decode.ts                         # static decode maps (status, type, region, category, …) applied at query time
       normalize.ts                      # N-number normalizer (strip leading N, uppercase)
@@ -275,10 +282,10 @@ src/
       search-aircraft-types.tool.ts     # FTS5 search of the aircraft reference table
       get-aircraft-type.tool.ts         # decode a 6–7-character mfr/model/series code
     resources/definitions/
-      registration.resource.ts          # faa://registration/{nNumber} (reuses the lookup handler)
+      registration.resource.ts          # faa://registration/{nNumber} (shares the lookup record schema)
   cli/
     faa-mirror-init.ts                  # mirror:init — full out-of-band build
-    faa-mirror-refresh.ts               # mirror:refresh — incremental/full rebuild
+    faa-mirror-refresh.ts               # mirror:refresh — full rebuild
     faa-mirror-verify.ts                # mirror:verify — readiness + integrity check
     _mirror-context.ts                 # shared mirror-instance shim for the three CLI scripts
 ```
@@ -298,7 +305,7 @@ src/
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is `framework-skills/`, not `skills/`, because Claude Code and Codex auto-load a plugin's root `skills/` — these are development-time skills for building the server, not skills for the agents that install it.
+Read development skills in `framework-skills/` when a task matches. Run `bun run list-skills` for the full registry. Root `skills/` is reserved for published skills that help agents use the server. Plugin hosts load that tree directly, npm, Docker, and MCPB carry it, and `createApp({ skills: 'skills' })` serves it over MCP.
 
 **Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. The agent mirrors keep the name `skills/` — plugin hosts do not scan them. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
@@ -313,6 +320,7 @@ Available skills:
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
 | `add-service` | Scaffold a new service integration |
+| `add-skill` | Author and verify a published skill in root `skills/` |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
 | `tool-defs-analysis` | Read-only audit of MCP definition language across the surface — voice, leaks, defaults, recovery hints, output descriptions |
@@ -366,7 +374,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run test` | Run unit and integration tests (Vitest — use `bun run test`, not `bun test`) |
 | `bun run test:package` | Build and exercise the npm tarball and cleaned MCPB with real Node and Bun processes |
-| `bun run mirror:init` | Build the SQLite registry index from the FAA ZIP — full out-of-band build. Run once before first use; idempotent and resumable. Never on server startup. |
+| `bun run mirror:init` | Build the SQLite registry index from the FAA ZIP before first use, never on server startup. Rerunning after an interruption starts a full rebuild. |
 | `bun run mirror:refresh` | Rebuild the index from the latest FAA release. The HTTP server schedules this daily; stdio operators run it out-of-band. |
 | `bun run mirror:verify` | Report index health — readiness, sync status, record count, SQLite integrity check. Exits non-zero when not ready or integrity fails. |
 | `bun run start:stdio` | Production mode (stdio) |
@@ -381,7 +389,9 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. Cleanup prunes dev dependencies, dependency-shipped agent docs, and optional DuckDB platform bindings. The required `better-sqlite3` production dependency retains all eight bundled N-API prebuilts (macOS, Windows, Linux glibc/musl × x64/arm64). Source and development scripts are excluded; the mirror CLI ships as `dist/cli/*.js`. MCPB is stdio-only.
+`bun run bundle` produces a stdio-only `.mcpb` for Claude Desktop. Use root-anchored entries in `.mcpbignore` for source, tests, docs, plugin manifests, and other repository-local paths. Root `skills/` and the compiled mirror CLI in `dist/cli/` ship in the bundle. Cleanup removes dev dependencies, dependency agent docs, DuckDB platform bindings, node-gyp intermediate files, and build-only package files. The required `better-sqlite3` dependency retains all eight N-API prebuilts (macOS, Windows, Linux glibc/musl × x64/arm64).
+
+Root `plugin.json` and `mcp.json` are the Agent Plugins 1.0.0 metadata and stdio launcher. Keep user-supplied variables in the host overlays and retain the `.codex-plugin/plugin.json` pointer to `./.codex-plugin/mcp.json` so Codex can forward them.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
@@ -442,7 +452,7 @@ import { getRegistryService } from '@/services/registry/registry-service.js';
 - [ ] Optional nested objects: handler guards for empty inner values from form-based clients (`if (input.obj?.field && ...)`, not just `if (input.obj)`). When regex/length constraints matter, use `z.union([z.literal(''), z.string().regex(...).describe(...)])` — literal variants are exempt from `describe-on-fields`.
 - [ ] JSDoc `@fileoverview` + `@module` on every file
 - [ ] `ctx.log` for logging; data access goes through `registry-service` (the mirror), never persistence directly
-- [ ] Owner-PII redaction holds: PII fields dropped AND owner-name search disabled when redacted; the gate is the single chokepoint in `registry-service`
+- [ ] Owner-PII redaction holds across output, matching, counts and ordering; owner-name search stays disabled when redacted
 - [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data
 - [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
@@ -450,6 +460,8 @@ import { getRegistryService } from '@/services/registry/registry-service.js';
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] Root plugin metadata matches `package.json` and the root launcher carries only fixed environment values
+- [ ] Any published skill passes `lint:packaging`, with its gates and identifiers verified in a field test
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`

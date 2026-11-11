@@ -36,6 +36,13 @@
           "default": ".mirror/faa-registry.db"
         },
         {
+          "name": "FAA_CLAMP_LIMITS",
+          "description": "Clamp search page sizes above 200 by default. Set to false to reject larger limits.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "FAA_DATABASE_URL",
           "description": "Source URL for the FAA Releasable Aircraft Database ZIP (used by mirror:init/refresh only).",
           "format": "string",
@@ -80,6 +87,13 @@
           "format": "string",
           "isRequired": false,
           "default": ".mirror/faa-registry.db"
+        },
+        {
+          "name": "FAA_CLAMP_LIMITS",
+          "description": "Clamp search page sizes above 200 by default. Set to false to reject larger limits.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
         },
         {
           "name": "FAA_DATABASE_URL",

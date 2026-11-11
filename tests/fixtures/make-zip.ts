@@ -12,6 +12,8 @@ import { deflateRawSync } from 'node:zlib';
 /** One entry to pack. `data` is the uncompressed content. */
 export interface ZipInput {
   data: Buffer;
+  /** Packed calendar date in the central directory. */
+  dosDate?: number;
   /** Compression to apply — DEFLATE (default) or STORED (uncompressed). */
   method?: 'deflate' | 'store';
   name: string;
@@ -48,6 +50,7 @@ export function makeZip(entries: ZipInput[]): Buffer {
     cd.writeUInt16LE(20, 4); // version made by
     cd.writeUInt16LE(20, 6); // version needed
     cd.writeUInt16LE(compressionMethod, 10);
+    cd.writeUInt16LE(entry.dosDate ?? 0, 14);
     cd.writeUInt32LE(0, 16); // CRC
     cd.writeUInt32LE(body.length, 20);
     cd.writeUInt32LE(entry.data.length, 24);

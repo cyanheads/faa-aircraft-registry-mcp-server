@@ -8,8 +8,16 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getRegistryService } from '@/services/registry/registry-service.js';
+import { mirrorLoadingError } from '../../_mirror-errors.js';
 import { codedValueSchema } from './_schemas.js';
+import {
+  applySearchLimit,
+  enrichSearchPage,
+  searchEnrichment,
+  searchLimitSchema,
+} from './_search-page.js';
 
 const aircraftTypeSummarySchema = z
   .object({
@@ -38,7 +46,12 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
-    query: z.string().optional().describe('Manufacturer and/or model name to match (full-text).'),
+    query: z
+      .string()
+      .optional()
+      .describe(
+        'Aircraft manufacturer or model. Each search term matches a token prefix, such as 172 matching 172S.',
+      ),
     aircraftType: z
       .string()
       .optional()
@@ -51,13 +64,7 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
       .describe(
         'Aircraft category code: 1 (Land), 2 (Sea), 3 (Amphibian), exact match. Trimmed; blank is unset.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(200)
-      .default(25)
-      .describe('Maximum number of results to return (1–200, default 25).'),
+    limit: searchLimitSchema,
     offset: z
       .number()
       .int()
@@ -74,35 +81,10 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
       .describe('Matching aircraft-reference summaries for this page (up to limit).'),
   }),
 
-  enrichment: {
-    totalCount: z
-      .number()
-      .describe('Total aircraft types matching the filters, across all pages. Always present.'),
-    nextOffset: z
-      .number()
-      .optional()
-      .describe(
-        'Offset to request the next page; absent when this page reached the end of the matches.',
-      ),
-    truncated: z
-      .boolean()
-      .optional()
-      .describe('Present and true only when matches remain beyond this page.'),
-    shown: z
-      .number()
-      .optional()
-      .describe('Number of results on this page (present only when truncated is set).'),
-    cap: z
-      .number()
-      .optional()
-      .describe('The limit that was applied (present only when truncated is set).'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Guidance when no aircraft types matched, or when more matches remain.'),
-  },
+  enrichment: searchEnrichment,
 
   errors: [
+    mirrorLoadingError,
     {
       reason: 'invalid_aircraft_type',
       thrownBy: 'service',
@@ -136,37 +118,31 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
       throw ctx.fail('no_filters', 'At least one search filter is required.');
     }
 
+    const { limit, notice } = applySearchLimit(ctx, 'faa_search_aircraft_types', input.limit);
+    let dataAsOf: string | undefined;
     const page = await service.searchAircraftTypes(
       {
         ...(query ? { query } : {}),
         ...(aircraftType ? { aircraftType } : {}),
         ...(category ? { category } : {}),
-        limit: input.limit,
+        limit,
         offset: input.offset,
       },
       ctx,
+      (snapshot) => {
+        dataAsOf = snapshot.dataAsOf;
+      },
     );
 
-    // Always populated — a required enrichment field must survive every success
-    // path, including the zero-result one.
-    ctx.enrich.total(page.totalCount);
-    const nextOffset = input.offset + page.items.length;
-    if (page.truncated) ctx.enrich({ nextOffset });
-
-    if (page.items.length === 0) {
-      ctx.enrich.notice(
-        page.totalCount > 0
-          ? `Offset ${input.offset} is past the end of this result set — ${page.totalCount} aircraft types match, but none remain at that offset. Retry with a lower offset.`
-          : 'No aircraft types matched the supplied filters. Broaden the name query or verify the type/category code.',
-      );
-    }
-    if (page.truncated) {
-      ctx.enrich.truncated({
-        shown: page.items.length,
-        cap: page.cap,
-        guidance: `Showing ${page.items.length} of ${page.totalCount} matching aircraft types. Call faa_search_aircraft_types again with the same filters and offset: ${nextOffset} for the next page.`,
-      });
-    }
+    enrichSearchPage(
+      ctx,
+      'faa_search_aircraft_types',
+      page,
+      input.offset,
+      dataAsOf,
+      notice,
+      'No aircraft types matched the supplied filters. Broaden the name query or verify the type/category code.',
+    );
 
     return { aircraftTypes: page.items };
   },
@@ -179,12 +155,14 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
       v ? (v.label ? `${v.label} (${v.code})` : v.code) : undefined;
     const lines: string[] = [];
     for (const a of result.aircraftTypes) {
-      lines.push(`### ${[a.manufacturer, a.model].filter(Boolean).join(' ') || a.code}`);
-      const facts: string[] = [`Code: ${a.code}`];
+      lines.push(
+        `### ${escapeMarkdownInline([a.manufacturer, a.model].filter(Boolean).join(' ') || a.code)}`,
+      );
+      const facts: string[] = [`Code: ${escapeMarkdownInline(a.code)}`];
       const type = coded(a.aircraftType);
-      if (type) facts.push(`Type: ${type}`);
+      if (type) facts.push(`Type: ${escapeMarkdownInline(type)}`);
       const category = coded(a.category);
-      if (category) facts.push(`Category: ${category}`);
+      if (category) facts.push(`Category: ${escapeMarkdownInline(category)}`);
       if (a.numberOfEngines !== undefined) facts.push(`Engines: ${a.numberOfEngines}`);
       if (a.numberOfSeats !== undefined) facts.push(`Seats: ${a.numberOfSeats}`);
       lines.push(facts.join(' | '));

@@ -38,12 +38,17 @@ export interface RegistrationRecord {
   aircraftType?: CodedValue;
   airworthinessClass?: CodedValue;
   airworthinessDate?: string;
+  approvedOperations?: CodedValue[];
   /** Raw approved-operations sub-code string (chars 2–10 of CERTIFICATION). */
   approvedOperationsRaw?: string;
   certIssueDate?: string;
+  /** Rated horsepower per engine. */
+  engineHorsepower?: number;
   engineMake?: string;
   engineManufacturerModelCode?: string;
   engineModel?: string;
+  /** Rated thrust per engine, in pounds. */
+  engineThrustLbs?: number;
   engineType?: CodedValue;
   expirationDate?: string;
   /** Always set (defaults to false) — the registry's fractional-ownership flag. */
@@ -105,6 +110,7 @@ export interface RegistrationSummary {
   /** Registrant name — present only when redaction is off. */
   ownerName?: string;
   ownerRedacted: boolean;
+  serialNumber?: string;
   state?: string;
   status?: CodedValue;
   yearManufactured?: number;
@@ -121,8 +127,22 @@ export interface AircraftTypeSummary {
   numberOfSeats?: number;
 }
 
+/** One historical DEREG entry for an N-number, which may have been reassigned. */
+export interface CancellationRecord {
+  cancelDate?: string;
+  exportCountry?: string;
+  make?: string;
+  manufacturerModelCode?: string;
+  model?: string;
+  serialNumber?: string;
+  status?: CodedValue;
+}
+
 /** Discriminated registration-status resolution across all three status files. */
-export type RegistrationStatusResult =
+export type RegistrationStatusResult = {
+  /** All cancellations for this N-number, newest first and undated last. */
+  cancellations?: CancellationRecord[];
+} & (
   | {
       recordType: 'active';
       nNumber: string;
@@ -133,16 +153,13 @@ export type RegistrationStatusResult =
       expirationDate?: string;
       airworthinessDate?: string;
     }
-  | {
+  | (CancellationRecord & {
       recordType: 'deregistered';
       nNumber: string;
       nNumberDisplay: string;
-      status?: CodedValue;
-      cancelDate?: string;
-      serialNumber?: string;
-      manufacturerModelCode?: string;
       modeSCodeHex?: string;
-    }
+      yearManufactured?: number;
+    })
   | {
       recordType: 'reserved';
       nNumber: string;
@@ -157,7 +174,8 @@ export type RegistrationStatusResult =
       recordType: 'unknown';
       nNumber: string;
       nNumberDisplay: string;
-    };
+    }
+);
 
 /** Search filters for {@link RegistryService.searchRegistrations}. */
 export interface RegistrationSearchFilters {
@@ -169,6 +187,7 @@ export interface RegistrationSearchFilters {
   /** Zero-based index of the first row to return. */
   offset: number;
   ownerName?: string;
+  serialNumber?: string;
   state?: string;
 }
 

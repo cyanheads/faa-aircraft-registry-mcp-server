@@ -1,6 +1,6 @@
 # faa-aircraft-registry-mcp-server - Directory Structure
 
-Generated on: 2026-10-17 22:09:14
+Generated on: 2026-11-11 05:44:53
 
 ```text
 faa-aircraft-registry-mcp-server/
@@ -36,6 +36,8 @@ faa-aircraft-registry-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -133,6 +135,9 @@ faa-aircraft-registry-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── faa-aircraft-registry-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── cli/
 │   │   ├── _mirror-context.ts
@@ -148,22 +153,28 @@ faa-aircraft-registry-mcp-server/
 │   │   │   └── definitions/
 │   │   │       ├── index.ts
 │   │   │       └── registration.resource.ts
-│   │   └── tools/
-│   │       └── definitions/
-│   │           ├── _schemas.ts
-│   │           ├── get-aircraft-type.tool.ts
-│   │           ├── get-registration-status.tool.ts
-│   │           ├── index.ts
-│   │           ├── lookup-registration.tool.ts
-│   │           ├── search-aircraft-types.tool.ts
-│   │           └── search-registrations.tool.ts
+│   │   ├── tools/
+│   │   │   └── definitions/
+│   │   │       ├── _response-metadata.ts
+│   │   │       ├── _schemas.ts
+│   │   │       ├── _search-page.ts
+│   │   │       ├── get-aircraft-type.tool.ts
+│   │   │       ├── get-registration-status.tool.ts
+│   │   │       ├── index.ts
+│   │   │       ├── lookup-registration.tool.ts
+│   │   │       ├── search-aircraft-types.tool.ts
+│   │   │       └── search-registrations.tool.ts
+│   │   └── _mirror-errors.ts
 │   ├── services/
 │   │   └── registry/
 │   │       ├── csv.ts
 │   │       ├── decode.ts
 │   │       ├── ingest.ts
 │   │       ├── normalize.ts
+│   │       ├── registry-mirror.ts
+│   │       ├── registry-search.ts
 │   │       ├── registry-service.ts
+│   │       ├── registry-snapshot.ts
 │   │       ├── schema.ts
 │   │       ├── types.ts
 │   │       └── zip.ts
@@ -189,6 +200,7 @@ faa-aircraft-registry-mcp-server/
 │   │   ├── csv.test.ts
 │   │   ├── decode.test.ts
 │   │   ├── ingest.test.ts
+│   │   ├── registry-query.test.ts
 │   │   ├── registry-service.test.ts
 │   │   ├── schema.test.ts
 │   │   └── zip.test.ts
@@ -211,7 +223,9 @@ faa-aircraft-registry-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

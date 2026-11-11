@@ -10,6 +10,7 @@ import { resource, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { registrationRecordSchema } from '@/mcp-server/tools/definitions/_schemas.js';
 import { getRegistryService } from '@/services/registry/registry-service.js';
+import { mirrorLoadingError } from '../../_mirror-errors.js';
 
 export const registrationResource = resource('faa://registration/{nNumber}', {
   name: 'faa-registration',
@@ -29,6 +30,7 @@ export const registrationResource = resource('faa://registration/{nNumber}', {
   output: registrationRecordSchema,
 
   errors: [
+    mirrorLoadingError,
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,

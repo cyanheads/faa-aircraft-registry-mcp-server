@@ -3,7 +3,47 @@
  * @module tests/services/decode.test
  */
 import { describe, expect, it } from 'vitest';
-import { decodeStatusCode, decodeWeightClass } from '@/services/registry/decode.js';
+import {
+  decodeApprovedOperations,
+  decodeStatusCode,
+  decodeWeightClass,
+} from '@/services/registry/decode.js';
+
+describe('approved operations decoder', () => {
+  it('decodes multiple Standard operations and preserves unknown fragments', () => {
+    expect(decodeApprovedOperations('1', 'NU?')).toEqual([
+      { code: 'N', label: 'Normal' },
+      { code: 'U', label: 'Utility' },
+      { code: '?' },
+    ]);
+  });
+
+  it('uses the Experimental table for the same digits that occur under Multiple', () => {
+    expect(decodeApprovedOperations('4', '1318')).toEqual([
+      { code: '1', label: 'Research and Development' },
+      { code: '3', label: 'Exhibition' },
+      { code: '1', label: 'Research and Development' },
+      { code: '8' },
+    ]);
+  });
+
+  it('keeps significant spaces when reading Multiple positions', () => {
+    expect(decodeApprovedOperations('6', ' 31')).toEqual([
+      { code: '3', label: 'Restricted' },
+      { code: '1', label: 'Agriculture and Pest Control' },
+    ]);
+    expect(decodeApprovedOperations('6', '1 3')).toEqual([
+      { code: '1', label: 'Standard' },
+      { code: '3', label: 'Aerial Advertising' },
+    ]);
+  });
+
+  it('leaves codes unlabeled for an unknown class and omits blank operations', () => {
+    expect(decodeApprovedOperations('Z', 'N')).toEqual([{ code: 'N' }]);
+    expect(decodeApprovedOperations('4', ' ')).toBeUndefined();
+    expect(decodeApprovedOperations('4', undefined)).toBeUndefined();
+  });
+});
 
 describe('status decoder compatibility', () => {
   it.each([

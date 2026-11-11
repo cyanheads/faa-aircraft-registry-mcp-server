@@ -24,7 +24,7 @@ afterAll(async () => {
 });
 
 describe('standalone mirror verify diagnostics', () => {
-  it.each(['initialized', 'cold', 'ready-empty'] as const)(
+  it.each(['initialized', 'cold', 'ready-empty', 'loading'] as const)(
     'reports %s mirror readiness with visible logs',
     async (state) => {
       const mirrorPath = join(scratch, `${state}.db`);
@@ -34,7 +34,14 @@ describe('standalone mirror verify diagnostics', () => {
         handle.exec('DELETE FROM registration');
         handle.close();
       }
-      const result = await exec('bun', ['run', 'mirror:verify'], {
+      if (state === 'loading') {
+        const handle = await openSqliteHandle(mirrorPath);
+        handle.exec(
+          "INSERT INTO registry_generation VALUES (1, 'fixture-owner', 1, 1, '2026-11-09')",
+        );
+        handle.close();
+      }
+      const result = await exec('bun', ['src/cli/faa-mirror-verify.ts'], {
         env: {
           ...process.env,
           NODE_ENV: 'production',
@@ -49,11 +56,12 @@ describe('standalone mirror verify diagnostics', () => {
       expect(result.code).toBe(state === 'initialized' ? 0 : 1);
       expect(result.output).toContain('FAA registry mirror status:');
       expect(result.output).toContain(
-        state === 'initialized'
-          ? 'integrity check passed'
-          : state === 'cold'
-            ? 'Mirror is NOT ready'
-            : 'registration table is EMPTY',
+        {
+          initialized: 'integrity check passed',
+          cold: 'Mirror is NOT ready',
+          'ready-empty': 'registration table is EMPTY',
+          loading: 'Mirror is loading',
+        }[state],
       );
     },
   );

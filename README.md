@@ -1,13 +1,13 @@
 <div align="center">
-  <h1>@cyanheads/faa-aircraft-registry-mcp-server</h1>
+<h1>@cyanheads/faa-aircraft-registry-mcp-server</h1>
   <p><b>Decode N-numbers to aircraft, engine, status, and owner; search the US civil aircraft registry by owner, type, or state; resolve active/deregistered/reserved status — offline via MCP. STDIO or Streamable HTTP.</b>
-  <div>5 Tools • 1 Resource</div>
+  <div>5 Tools • 1 Registration Resource • 1 Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.12-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/faa-aircraft-registry-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Ffaa-aircraft-registry-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/faa-aircraft-registry-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.12-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/faa-aircraft-registry-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Ffaa-aircraft-registry-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/faa-aircraft-registry-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,15 +29,15 @@
 
 ## Overview
 
-The US civil aircraft registry, searchable offline from the FAA's Releasable Aircraft Database. Decode an N-number to its aircraft, engine, and registered owner; check whether it's active, deregistered, or reserved; and search by owner, make and model, state, or Mode S code.
+The US civil aircraft registry, searchable offline from the FAA's Releasable Aircraft Database. Decode an N-number to its aircraft, engine, and registered owner; check its current state and cancellation history; and search by serial number, make and model, state, Mode S code, or owner when redaction is off.
 
 ### Tools
 
 | Tool | Description |
 |:---|:---|
-| `faa_lookup_registration` | Decode one N-number to its full pre-joined active record — aircraft make/model, engine, year, airworthiness, registration status, Mode S code, and registered owner (when redaction is off). |
-| `faa_get_registration_status` | Resolve an N-number across all three status files (active, deregistered, reserved) in priority order, returning a definitive `recordType`. |
-| `faa_search_registrations` | Search active registrations by owner name, make/model, exact manufacturer/model code, state, aircraft type, or Mode S code. |
+| `faa_lookup_registration` | Decode one active N-number to aircraft, engine ratings, approved operations, registration dates, Mode S code, and registered owner when redaction is off. |
+| `faa_get_registration_status` | Resolve current state in active → reserved → deregistered order, with cancellation history for the N-number. |
+| `faa_search_registrations` | Search active registrations by serial number, owner name, make/model, exact manufacturer/model code, state, aircraft type, or Mode S code. |
 | `faa_search_aircraft_types` | Search the aircraft reference table by manufacturer/model name, type, or category to discover manufacturer-model codes. |
 | `faa_get_aircraft_type` | Decode a 6–7-character manufacturer/model/series code to aircraft specs — category, type, engine, seats, weight class, cruise speed, type-certificate data. |
 
@@ -47,7 +47,9 @@ The US civil aircraft registry, searchable offline from the FAA's Releasable Air
 |:---|:---|
 | `faa://registration/{nNumber}` | Full registration record for one N-number — the same decoded, pre-joined payload as `faa_lookup_registration`. |
 
-Also reachable via `faa_lookup_registration`; search collections aren't exposed as resources.
+The registration resource returns the same domain fields as `faa_lookup_registration`. Search results are available through the tools.
+
+The [FAA registry guide](skills/faa-aircraft-registry-guide/SKILL.md) covers model-code discovery, serial disambiguation, snapshot-aware paging, and N-number reassignment. It ships with plugin, npm, Docker, and MCPB installs and is available over MCP as `skill://faa-aircraft-registry-guide/SKILL.md`.
 
 ## Capability reference
 
@@ -55,6 +57,8 @@ Also reachable via `faa_lookup_registration`; search collections aren't exposed 
 
 - Accepts `N12345` or `12345`; the leading `N` is optional
 - Returns decoded aircraft, engine, and status fields as raw code plus label, and the Mode S code in octal and hex (hex is the ICAO 24-bit address)
+- Preserves `approvedOperationsRaw` and decodes operations using the airworthiness class; unknown codes retain their raw value without a label
+- Includes known per-engine `engineHorsepower` and `engineThrustLbs`; zero or missing ratings stay absent
 - Owner name and address appear only when `FAA_REDACT_OWNER_PII=false`; otherwise `ownerRedacted: true`
 - Errors: `not_found` (no active registration; try `faa_get_registration_status`), `invalid_n_number`
 
@@ -62,17 +66,20 @@ Also reachable via `faa_lookup_registration`; search collections aren't exposed 
 
 ### `faa_get_registration_status` <sub>tool</sub>
 
-- Checks the active, deregistered, and reserved files in that order
-- `recordType` is `active`, `deregistered`, `reserved`, or `unknown`; a never-issued number returns `unknown`, not an error
-- Status facts only, no owner data
+- Checks the active, reserved, and deregistered files in that order
+- `recordType` is `active`, `deregistered`, `reserved`, or `unknown`; a number absent from the snapshot returns `unknown`, not an error
+- Includes available `cancellations` newest first, with aircraft identity and export country when known. An N-number can be reassigned, so its history can span different airframes
+- A cancellation row's status is the status recorded on that row, not the current registration state or a cancellation cause; no owner data is returned
 - Error: `invalid_n_number`
 
 ---
 
 ### `faa_search_registrations` <sub>tool</sub>
 
-- Filters: `ownerName`, `makeModel`, `manufacturerModelCode`, `state`, `aircraftType`, `modeSCode`; at least one required, combined with AND
-- `limit` 1–200 (default 25) with `offset` paging; responses report `totalCount` and `nextOffset` when truncated
+- Filters: `ownerName`, `makeModel`, `manufacturerModelCode`, `serialNumber`, `state`, `aircraftType`, `modeSCode`; at least one required, combined with AND
+- Make/model terms match token prefixes, so `Cessna 172` includes variants such as 172S. Owner terms retain whole-token matching
+- Serial matching is exact after trimming and ignores case; leading zeros, punctuation, and internal spaces remain significant. Serials can repeat across manufacturers; combine with a model filter to narrow them
+- `limit` defaults to 25 and clamps to 200 with a notice; `FAA_CLAMP_LIMITS=false` rejects larger requests. Responses report `totalCount` and `nextOffset` for `offset` paging
 - Each result carries an N-number to pass to `faa_lookup_registration`
 - Errors: `no_filters`, `invalid_code`, `invalid_state`, `invalid_mode_s_code`, `invalid_aircraft_type`, and `owner_search_disabled` (owner-name search is off while `FAA_REDACT_OWNER_PII` is on)
 
@@ -80,9 +87,9 @@ Also reachable via `faa_lookup_registration`; search collections aren't exposed 
 
 ### `faa_search_aircraft_types` <sub>tool</sub>
 
-- Filters: `query` (manufacturer/model name), `aircraftType` (1–9/H/O), `category` (1–3); at least one required
+- Filters: `query` (manufacturer/model token prefixes), `aircraftType` (1–9/H/O), `category` (1–3); at least one required
 - Returns summaries with the code to pass to `faa_get_aircraft_type` or `faa_search_registrations.manufacturerModelCode`
-- `limit` 1–200 (default 25) with `offset` paging; responses report `totalCount` and `nextOffset` when truncated
+- `limit` defaults to 25 and clamps to 200 with a notice; `FAA_CLAMP_LIMITS=false` rejects larger requests. Responses report `totalCount` and `nextOffset` for `offset` paging
 - Errors: `no_filters`, `invalid_aircraft_type`, `invalid_category`
 
 ---
@@ -98,7 +105,7 @@ Also reachable via `faa_lookup_registration`; search collections aren't exposed 
 
 ### `faa://registration/{nNumber}` <sub>resource</sub>
 
-- Same payload as `faa_lookup_registration`; `application/json`, cached 1 hour
+- Same domain payload as `faa_lookup_registration`; `application/json` with a one-hour private cache hint. Tool freshness enrichment is not included
 - `nNumber` accepts `N12345` or `12345`
 - Errors: `not_found`, `invalid_n_number`
 
@@ -112,6 +119,8 @@ FAA registry-specific:
 - Daily index refresh under HTTP transport, aligned to the FAA's nightly re-release
 - Pre-joined records: one call returns decoded aircraft, engine, and status
 - Owner name and address are redacted by default, and owner-name search is disabled until `FAA_REDACT_OWNER_PII=false`
+- Builder names identified from registrant records are withheld from aircraft output and matching under redaction, including repeated kit-manufacturer names. Public manufacturer names and model-only searches remain available
+- A rebuild is unavailable to readers until it completes; a failed rebuild cannot serve partial registry results
 - Mode S hex codes match the ICAO 24-bit addresses used by flight-tracking feeds
 
 Agent-friendly output:
@@ -120,6 +129,7 @@ Agent-friendly output:
 - Capped search results flag `truncated` with `shown` and `cap`
 - Fields the FAA leaves blank stay absent rather than filled in
 - `recordType` and `ownerRedacted` let callers branch on data
+- Successful tools include `dataAsOf` when the source archive date is known, with a refresh notice when it is more than seven days old. Missing dates are disclosed, never replaced by the local build time
 
 ## Getting started
 
@@ -217,7 +227,7 @@ The FAA Releasable Aircraft Database is not bundled with the package — it is a
 Build the index out-of-band (never on server startup — a full parse of ~1M rows must not block start). From a source checkout, run `bun install && bun run build` first. Then, from the checkout, installed package directory, or extracted MCPB directory, run the compiled commands below. Node and Bun both work; replace `node` with `bun` to use Bun's built-in SQLite. The Docker image supports `bun run mirror:init`, `mirror:verify`, and `mirror:refresh`.
 
 ```sh
-# Build the local index from the live FAA download (idempotent, resumable)
+# Build the local index from the FAA download
 FAA_MIRROR_PATH=/path/to/faa-registry.db node dist/cli/faa-mirror-init.js
 
 # Verify it built (readiness + integrity check)
@@ -228,7 +238,9 @@ FAA_MIRROR_PATH=/path/to/faa-registry.db node dist/cli/faa-mirror-refresh.js
 ```
 
 - **Keep the path stable.** Point `FAA_MIRROR_PATH` (and the same env var in your MCP client config) at a persistent location so the built index is reused across runs. Default: `.mirror/faa-registry.db`.
-- **Daily refresh.** Under HTTP transport the server schedules a daily `mirror:refresh` aligned to the FAA's nightly re-release (~11:30 PM Central). If an interrupted rebuild leaves the index empty, queries fail loudly with `ServiceUnavailable` until the rebuild succeeds. Under stdio, run `mirror:refresh` out-of-band (e.g. a cron job).
+- **Daily refresh.** Under HTTP transport the server schedules a daily `mirror:refresh`. From the first table replacement until successful completion, queries return retryable `ServiceUnavailable` (`mirror_loading`). An interrupted rebuild stays unavailable until a refresh succeeds. A download or archive-manifest failure before replacement preserves the complete index. Under stdio, run `mirror:refresh` out-of-band (e.g. a cron job).
+- **Existing indexes.** Run `mirror:refresh` after upgrading to populate manufacturer classification, source date, and cancellation fields. Until classification is known, redacted queries conservatively withhold non-type-certificated manufacturer names. Use matching server and CLI versions when refreshing the same database.
+- **Recovery after a process exit.** An immediate refresh can return `sync_locked` while the interrupted writer's lease remains valid. Wait for the lease to expire, then rerun `mirror:refresh`.
 - **Docker.** The image ships the mirror CLI and a writable `.mirror` data directory owned by the runtime user. Mount a volume there and run `mirror:init` once (e.g. `docker exec <container> bun run mirror:init`, or a one-shot init job against the shared volume) so the index persists across container restarts.
 - **Until the index exists,** every query fails with a `ServiceUnavailable` error whose recovery hint points to `mirror:init` — there is no live API to fall back to, so the cold state surfaces loudly rather than returning empty results.
 
@@ -236,7 +248,7 @@ The source URL is overridable via `FAA_DATABASE_URL` (for a private or cached mi
 
 ### Prerequisites
 
-- [Bun v1.4](https://bun.sh/) or higher (or Node.js v24+). Bun uses built-in `bun:sqlite`; Node uses the included `better-sqlite3` dependency, with bundled N-API prebuilts for macOS, Windows, and Linux (glibc/musl), on x64 and arm64.
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+). Bun uses built-in `bun:sqlite`. Node uses the included `better-sqlite3` dependency, with bundled N-API prebuilts for macOS, Windows, and Linux (glibc/musl), on x64 and arm64.
 - Disk space for the built index (a few hundred MB) at `FAA_MIRROR_PATH`.
 - Network access at `mirror:init` / `mirror:refresh` time to download the FAA ZIP. Not needed at query time.
 
@@ -273,7 +285,8 @@ bun run mirror:init
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `FAA_REDACT_OWNER_PII` | Redact owner name and address and disable owner-name search. Unset, empty, or malformed counts as `true`. | `true` |
+| `FAA_REDACT_OWNER_PII` | Redact owner identity and matching builder names, and disable owner-name search. Unset, empty, or malformed counts as `true`. | `true` |
+| `FAA_CLAMP_LIMITS` | Clamp search limits above 200 with a notice; `false` restores strict rejection. | `true` |
 | `FAA_MIRROR_PATH` | Path to the SQLite index file; use a persistent location. | `.mirror/faa-registry.db` |
 | `FAA_DATABASE_URL` | Source URL for the FAA database ZIP, read only by `mirror:init` / `mirror:refresh`. | FAA registry ZIP |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
@@ -282,7 +295,7 @@ bun run mirror:init
 | `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path where the MCP server is mounted. | `/mcp` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
-| `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
+| `LOGS_DIR` | Directory for log files (Node.js only). Relative paths resolve from the server package. | `<server-package-root>/logs` |
 | `LOG_TOOL_FAILURE_PAYLOADS` | Log each failed tool call's arguments and result (cap: `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES`, default `16384`). | `false` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
@@ -338,6 +351,7 @@ The Dockerfile defaults to HTTP transport with stateless sessions, ships the `mi
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). |
 | `src/services/registry` | Registry service — the SQLite + FTS5 mirror, ingester, decode maps, N-number normalizer, and the owner-PII redaction gate. |
 | `src/cli/` | Mirror lifecycle CLI — compiled to `dist/cli/` for `mirror:init`, `mirror:refresh`, `mirror:verify`. |
+| `skills/` | Published guide for agents using the FAA tools. |
 | `tests/` | Unit and integration tests mirroring `src/`. |
 
 ## Development guide

@@ -139,7 +139,7 @@ describe('packaged mirror lifecycle', () => {
       const server = createServer((_request, response) => {
         const files = {
           'MASTER.txt': `N-NUMBER,MFR MDL CODE,ENG MFR MDL,NAME,STATUS CODE\n${nNumber},2072714,41514,FIXTURE OWNER,V\n`,
-          'ACFTREF.txt': 'CODE,MFR,MODEL\n2072714,CESSNA,172S\n',
+          'ACFTREF.txt': 'CODE,MFR,MODEL,BUILD-CERT-IND\n2072714,CESSNA,172S,0\n',
           'ENGINE.txt': 'CODE,MFR,MODEL\n41514,LYCOMING,IO-360\n',
           'DEREG.txt': 'N-NUMBER\n',
           'RESERVED.txt': 'N-NUMBER\n',

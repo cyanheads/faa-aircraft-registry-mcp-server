@@ -2,9 +2,9 @@
 /**
  * @fileoverview mirror:refresh — rebuild the FAA registry index from the latest
  * Releasable Aircraft Database ZIP. The FAA daily release is a full snapshot, so
- * a refresh performs a full rebuild; the index stays transactionally queryable
- * throughout. Run out-of-band for stdio deployments (the HTTP server schedules
- * this on a daily cron itself).
+ * a refresh performs a full rebuild. Queries are unavailable from the wipe
+ * until the new generation completes. Run out-of-band for stdio deployments
+ * (the HTTP server schedules this on a daily cron itself).
  * @module cli/faa-mirror-refresh
  */
 

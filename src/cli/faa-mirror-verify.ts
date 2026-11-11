@@ -7,7 +7,9 @@
  * @module cli/faa-mirror-verify
  */
 
+import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
+import { withRegistrySnapshot } from '@/services/registry/registry-snapshot.js';
 import { getMirror, initCliLogging } from './_mirror-context.js';
 
 await initCliLogging();
@@ -21,21 +23,29 @@ logger.info(
 );
 if (status.error) logger.warning(`Last sync error: ${status.error}`);
 
-if (!status.ready) {
-  logger.error('Mirror is NOT ready — run mirror:init to build the index.', context);
-  await mirror.close();
-  process.exit(1);
-}
-
-// `ready()` reflects only the last sync's completion marker, so an interrupted
-// rebuild that emptied the primary table before reloading it still reports ready.
-// Treat a ready-but-empty index as a failure — the exact state the runtime
-// readiness guard rejects — so this health check gates a deploy on real data.
-if (recordCount === 0) {
-  logger.error(
-    'Mirror reports ready but the registration table is EMPTY — a rebuild was likely interrupted. Re-run mirror:init (or mirror:refresh) to rebuild the index.',
-    context,
-  );
+try {
+  withRegistrySnapshot(await mirror.raw(), () => undefined);
+} catch (error) {
+  const reason = error instanceof McpError ? error.data?.reason : undefined;
+  switch (reason) {
+    case 'mirror_not_ready':
+      logger.error('Mirror is NOT ready — run mirror:init to build the index.', context);
+      break;
+    case 'mirror_empty':
+      logger.error(
+        'Mirror reports ready but the registration table is EMPTY. Re-run mirror:init (or mirror:refresh) to rebuild the index.',
+        context,
+      );
+      break;
+    case 'mirror_loading':
+      logger.error(
+        'Mirror is loading — wait for the rebuild, or re-run mirror:refresh if it was interrupted.',
+        context,
+      );
+      break;
+    default:
+      throw error;
+  }
   await mirror.close();
   process.exit(1);
 }
