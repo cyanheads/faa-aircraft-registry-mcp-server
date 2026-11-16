@@ -33,7 +33,7 @@
     "faa_redact_owner_pii": {
       "type": "string",
       "title": "Redact owner PII",
-      "description": "Redact registrant name/address and disable owner-name search. Keep 'true' (the safe default) for shared use; set 'false' only on a trusted personal install to expose full owner detail.",
+      "description": "Redact registrant name/address and builder names matching a current or former registrant, and disable owner-name search. Keep 'true' (the safe default) for shared use; set 'false' only on a trusted personal install to expose full owner detail.",
       "default": "true",
       "required": false
     },

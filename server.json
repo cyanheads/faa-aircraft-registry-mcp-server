@@ -23,7 +23,7 @@
       "environmentVariables": [
         {
           "name": "FAA_REDACT_OWNER_PII",
-          "description": "Redact owner name/address and disable owner-name search. Redacted by default; set to false only on trusted local installs. Unset/empty/malformed resolves to redacted.",
+          "description": "Redact owner name/address and builder names matching a current or former registrant, and disable owner-name search. Redacted by default; set to false only on trusted local installs. Unset/empty/malformed resolves to redacted.",
           "format": "string",
           "isRequired": false,
           "default": "true"
@@ -76,7 +76,7 @@
         },
         {
           "name": "FAA_REDACT_OWNER_PII",
-          "description": "Redact owner name/address and disable owner-name search. Redacted by default; set to false only on trusted local installs. Unset/empty/malformed resolves to redacted.",
+          "description": "Redact owner name/address and builder names matching a current or former registrant, and disable owner-name search. Redacted by default; set to false only on trusted local installs. Unset/empty/malformed resolves to redacted.",
           "format": "string",
           "isRequired": false,
           "default": "true"

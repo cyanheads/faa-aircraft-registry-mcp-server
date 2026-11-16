@@ -33,7 +33,7 @@ await createApp({
    */
   sessionMode: 'stateless',
   instructions:
-    'Look up the offline US civil aircraft registry. Use faa_lookup_registration for an active N-number, or faa_get_registration_status for its current state and cancellation history. Find registrations by make/model token prefixes, exact manufacturer/model code or serial number, state, aircraft type, or Mode S. Discover manufacturer/model codes with faa_search_aircraft_types and get their specs with faa_get_aircraft_type. Coded fields include the raw FAA code and any known label. By default, owner details and personal builder names are withheld, and owner-name search is disabled. The operator must initialize the registry mirror before queries can succeed.',
+    'Look up the offline US civil aircraft registry. Use faa_lookup_registration for an active N-number, or faa_get_registration_status for its current state and cancellation history. Find registrations by make/model token prefixes, exact manufacturer/model code, engine code, or serial number, state, aircraft type, airworthiness class, manufacture-year range, or Mode S. Discover manufacturer/model codes with faa_search_aircraft_types and get their specs with faa_get_aircraft_type. Coded fields include the raw FAA code and any known label. By default, owner details and builder names matching a current or former registrant are withheld, and owner-name search is disabled. The operator must initialize the registry mirror before queries can succeed.',
   landing: {
     requireAuth: false,
     tagline:
