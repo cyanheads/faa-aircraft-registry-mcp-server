@@ -101,6 +101,8 @@ export interface AircraftTypeRecord {
 /** A summary row from a registration search (decoded, redaction-aware). */
 export interface RegistrationSummary {
   aircraftType?: CodedValue;
+  airworthinessClass?: CodedValue;
+  engineManufacturerModelCode?: string;
   make?: string;
   manufacturerModelCode?: string;
   model?: string;
@@ -180,6 +182,8 @@ export type RegistrationStatusResult = {
 /** Search filters for {@link RegistryService.searchRegistrations}. */
 export interface RegistrationSearchFilters {
   aircraftType?: string;
+  airworthinessClass?: string;
+  engineManufacturerModelCode?: string;
   limit: number;
   makeModel?: string;
   manufacturerModelCode?: string;
@@ -189,6 +193,10 @@ export interface RegistrationSearchFilters {
   ownerName?: string;
   serialNumber?: string;
   state?: string;
+  /** Latest year manufactured, inclusive. A blank (NULL or 0) year never matches. */
+  yearManufacturedMax?: number;
+  /** Earliest year manufactured, inclusive. A blank (NULL or 0) year never matches. */
+  yearManufacturedMin?: number;
 }
 
 /** Search filters for {@link RegistryService.searchAircraftTypes}. */

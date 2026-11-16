@@ -1,7 +1,7 @@
 /**
  * @fileoverview Field-level normalization helpers shared by the ingester and the
  * query layer — N-number canonicalization, FAA row-field cleaning, integer/date
- * coercion, and FTS5 query escaping. Pure functions, no I/O.
+ * coercion, and FTS5 match-expression building. Pure functions, no I/O.
  * @module services/registry/normalize
  */
 
@@ -28,6 +28,17 @@ const EXACT_FILTER_RULES = {
     pattern: /^[1-3]$/,
     reason: 'invalid_category',
     expected: 'one FAA category code: 1 (Land), 2 (Sea) or 3 (Amphibian)',
+  },
+  // Every stored and ENGINE code is five digits; leading zeros are significant.
+  engineManufacturerModelCode: {
+    pattern: /^[0-9]{5}$/,
+    reason: 'invalid_engine_code',
+    expected: 'a five-digit FAA engine manufacturer/model code, such as 17026',
+  },
+  airworthinessClass: {
+    pattern: /^[1-9]$/,
+    reason: 'invalid_airworthiness_class',
+    expected: 'one FAA airworthiness class code from 1 to 9, such as 4 (Experimental)',
   },
 };
 
@@ -129,32 +140,104 @@ export function parseFaaDate(value: string | undefined): string | undefined {
 }
 
 /**
+ * How {@link toFtsMatch} matches each search term: `whole` matches whole tokens as
+ * typed (names); `designator` matches token prefixes and also the other join/split
+ * spellings of a model designator, so `PA28` and `PA-28` find the same rows.
+ */
+export type FtsTermMatch = 'whole' | 'designator';
+
+/** Most boundaries a designator term is expanded across: at most 2⁴ = 16 spellings. */
+const MAX_DESIGNATOR_BOUNDARIES = 4;
+
+/**
+ * Spelling variants one search may add beyond its terms as typed. Each variant is
+ * another FTS phrase every statement of the search evaluates, so this bounds the
+ * expansion's added query cost; a term whose variants exceed what is left matches
+ * as typed, exactly as it would without expansion.
+ */
+export const DESIGNATOR_SPELLING_BUDGET = 20;
+
+/** The token characters of the FTS tokenizer (`unicode61`): letters, digits, private use. */
+const TOKEN_CHARACTER = /[\p{L}\p{N}\p{Co}]/u;
+
+/**
+ * A maximal letter or digit run. Runs meet at a boundary: a separator the tokenizer
+ * splits on (`PA-28`) or a letter/digit change it keeps in one token (`PA28`).
+ */
+const DESIGNATOR_RUN = /\p{N}+|[\p{L}\p{Co}]+/gu;
+
+/**
+ * Every join/split spelling of a designator term, the term as typed first and
+ * verbatim, keyed by its case-folded runs. Every split pattern of the same runs
+ * yields the same spellings, so terms sharing a key are one OR group. A term with
+ * no boundary keeps only its typed form; so does one with more than
+ * {@link MAX_DESIGNATOR_BOUNDARIES}, keyed by the term itself since its split
+ * pattern then matters. Returns `undefined` for a term with no token character.
+ */
+function designatorSpellings(term: string): { key: string; spellings: string[] } | undefined {
+  const runs: string[] = [];
+  let typedSplits = 0;
+  let end = 0;
+  for (const run of term.matchAll(DESIGNATOR_RUN)) {
+    if (runs.length > MAX_DESIGNATOR_BOUNDARIES) {
+      return { key: term.toLowerCase(), spellings: [term] };
+    }
+    if (runs.length > 0) typedSplits = (typedSplits << 1) | (run.index > end ? 1 : 0);
+    runs.push(run[0]);
+    end = run.index + run[0].length;
+  }
+  if (runs.length === 0) return;
+  const spellings = [term];
+  const boundaries = runs.length - 1;
+  for (let splits = 0; splits < 1 << boundaries; splits++) {
+    // The typed term already stands for the spelling that splits where it does.
+    if (splits === typedSplits) continue;
+    let spelling = runs[0] as string;
+    for (let i = 1; i < runs.length; i++) {
+      spelling += (splits >> (boundaries - i)) & 1 ? ` ${runs[i]}` : runs[i];
+    }
+    spellings.push(spelling);
+  }
+  return { key: runs.join(' ').toLowerCase(), spellings };
+}
+
+/**
  * Build a column-scoped FTS5 `MATCH` expression from user-supplied free text.
  * Escaping and scoping are deliberately co-located — a caller cannot obtain an
  * unscoped match expression, so a search term can never reach an FTS column the
  * caller did not name.
  *
- * Each token is stripped of `"` and re-wrapped in double quotes, making it an
- * FTS5 string literal; that neutralizes every operator (`-`, `*`, `:`, `^`, `{`,
- * `}`, `NEAR`, `AND`, …) so free text cannot break out of the expression.
+ * Each whitespace-separated term is stripped of `"` and re-wrapped in double
+ * quotes, making it an FTS5 string literal; that neutralizes every operator (`-`,
+ * `*`, `:`, `^`, `{`, `}`, `NEAR`, `AND`, …) so free text cannot break out of the
+ * expression. Generated spellings hold only letters, digits and spaces.
  *
- * The parentheses around the AND-joined tokens are load-bearing, not cosmetic:
+ * Terms are AND-ed. A term with no letter or digit is dropped (it would tokenize to
+ * an empty phrase that matches nothing), and a repeated term is matched once — AND
+ * is idempotent, so both only ever widen a result. In `designator` mode a term with
+ * one to {@link MAX_DESIGNATOR_BOUNDARIES} boundaries becomes `("as typed"* OR
+ * "<other spelling>"* …)`; the typed form is always an alternative, so no row the
+ * term matched as typed is lost. FTS5 applies `*` to a phrase's last token, keeping
+ * every spelling a token-prefix match. Expansion stops adding spellings at
+ * {@link DESIGNATOR_SPELLING_BUDGET}.
+ *
+ * The parentheses around the AND-joined terms are load-bearing, not cosmetic:
  * `:` binds tighter than `AND`, so `{make model} : "A" AND "B"` parses as
  * `({make model} : "A") AND "B"` and the second term silently matches every
  * indexed column. `{make model} : ("A" AND "B")` scopes the whole expression.
  *
- * Returns `undefined` when the input yields no usable tokens — emitting
+ * Returns `undefined` when the input yields no usable terms — emitting
  * `{cols} : ()` is an FTS5 syntax error, so the caller decides what an
  * unmatchable filter means rather than this helper widening it away.
  *
  * @param input - Raw user text.
  * @param columns - The FTS5 columns the match is confined to.
- * @param prefix - Add an FTS prefix operator outside each escaped literal.
+ * @param match - Whole-token terms, or token-prefix terms with designator spellings.
  */
 export function toFtsMatch(
   input: string,
   columns: readonly string[],
-  prefix = false,
+  match: FtsTermMatch,
 ): string | undefined {
   // SQLite's FTS parser treats NUL as a terminator, even inside a quoted token.
   if (input.includes('\0')) {
@@ -162,12 +245,29 @@ export function toFtsMatch(
       field: 'match',
     });
   }
-  const tokens = input
-    .trim()
-    .split(/\s+/)
-    .map((t) => t.replace(/"/g, '').trim())
-    .filter((t) => t.length > 0)
-    .map((t) => `"${t}"${prefix ? '*' : ''}`);
-  if (tokens.length === 0) return;
-  return `{${columns.join(' ')}} : (${tokens.join(' AND ')})`;
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  let budget = DESIGNATOR_SPELLING_BUDGET;
+  for (const raw of input.trim().split(/\s+/)) {
+    const term = raw.replace(/"/g, '');
+    if (match === 'whole') {
+      const key = term.toLowerCase();
+      if (!TOKEN_CHARACTER.test(term) || seen.has(key)) continue;
+      seen.add(key);
+      terms.push(`"${term}"`);
+      continue;
+    }
+    const designator = designatorSpellings(term);
+    if (!designator || seen.has(designator.key)) continue;
+    seen.add(designator.key);
+    const added = designator.spellings.length - 1;
+    if (added === 0 || added > budget) {
+      terms.push(`"${term}"*`);
+      continue;
+    }
+    budget -= added;
+    terms.push(`(${designator.spellings.map((spelling) => `"${spelling}"*`).join(' OR ')})`);
+  }
+  if (terms.length === 0) return;
+  return `{${columns.join(' ')}} : (${terms.join(' AND ')})`;
 }

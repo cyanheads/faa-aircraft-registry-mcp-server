@@ -18,12 +18,14 @@ import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { lookupRegistrationTool } from '@/mcp-server/tools/definitions/lookup-registration.tool.js';
 import { searchAircraftTypesTool } from '@/mcp-server/tools/definitions/search-aircraft-types.tool.js';
 import { searchRegistrationsTool } from '@/mcp-server/tools/definitions/search-registrations.tool.js';
+import { DESIGNATOR_SPELLING_BUDGET } from '@/services/registry/normalize.js';
 import {
   getRegistryService,
   initRegistryService,
   resetRegistryService,
 } from '@/services/registry/registry-service.js';
 import { buildFixtureDb, tempDbPath } from '../fixtures/build-fixture-db.js';
+import { makeZip } from '../fixtures/make-zip.js';
 
 const snapshotCalls = [
   [lookupRegistrationTool, { nNumber: 'N12345' }],
@@ -47,6 +49,27 @@ afterAll(async () => {
   await getRegistryService().mirrorInstance.close();
   resetRegistryService();
 });
+
+/** Swap the shared service onto another index; the caller restores the original afterwards. */
+const useService = async (redactOwnerPii: boolean, mirrorPath: string) => {
+  await getRegistryService().mirrorInstance.close();
+  initRegistryService({
+    redactOwnerPii,
+    mirrorPath,
+    databaseUrl: 'https://example.invalid/registry.zip',
+  });
+};
+
+/** File path of the index the shared service currently reads. */
+const currentIndexPath = async () => {
+  const handle = await getRegistryService().mirrorInstance.raw();
+  const file = handle.prepare<{ file: string }>('PRAGMA database_list').get()?.file;
+  if (!file) throw new Error('The shared fixture index path was not captured.');
+  return file;
+};
+
+const surfaces = (result: { structuredContent?: unknown; content: unknown }) =>
+  JSON.stringify([result.structuredContent, result.content]);
 
 describe.each([
   { definition: searchRegistrationsTool, filter: { state: 'WA' } },
@@ -781,6 +804,277 @@ describe('error envelope on the wire', () => {
   });
 });
 
+/**
+ * An unmatched Mode S search names what the address encodes. The decode table
+ * lives in tests/services/mode-s.test.ts; these cases prove the wiring once per
+ * branch, through the production parse and the content[] trailer.
+ */
+describe('faa_search_registrations unmatched Mode S code', () => {
+  const N399WM_SENTENCE =
+    'Mode S code A4A638 encodes N399WM. Call faa_get_registration_status with N399WM for its current state and cancellation history.';
+
+  it('adds nothing when a Mode S search has matches, on the page or past its end', async () => {
+    for (const offset of [0, 1]) {
+      const result = await runToolContract(searchRegistrationsTool, {
+        modeSCode: 'A4E2D9',
+        offset,
+      });
+      expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ totalCount: 1 });
+      expect(result.structuredContent).not.toHaveProperty('encodedNNumber');
+      for (const surface of [result.structuredContent, result.content]) {
+        expect(JSON.stringify(surface)).not.toContain('encode');
+      }
+      if (offset) expect(JSON.stringify(result.content)).toContain('past the end');
+    }
+  });
+
+  it.each([
+    { modeSCode: 'a4a638' },
+    { modeSCode: 'A4A638', state: 'WA' },
+    { modeSCode: ' a4a638 ', offset: 3 },
+  ])('names the encoded N-number for $modeSCode on both surfaces', async (input) => {
+    const result = await runToolContract(searchRegistrationsTool, input);
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      registrations: [],
+      totalCount: 0,
+      encodedNNumber: 'N399WM',
+      notice: expect.stringContaining(N399WM_SENTENCE),
+    });
+    const content = JSON.stringify(result.content);
+    expect(content).toContain(N399WM_SENTENCE);
+    expect(content).toContain('**encodedNNumber:** `N399WM`');
+    expect(content).not.toContain('undefined');
+  });
+
+  it.each([
+    ['ADF7C8', 'is in the US allocation (A00000–AFFFFF) but encodes no N-number.'],
+    ['3C6444', 'is outside the US allocation (A00000–AFFFFF) and encodes no N-number.'],
+  ])('explains why %s encodes no N-number without encodedNNumber', async (modeSCode, tail) => {
+    const result = await runToolContract(searchRegistrationsTool, { modeSCode });
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    const sentence = `Mode S code ${modeSCode} ${tail}`;
+    expect(result.structuredContent).toMatchObject({
+      totalCount: 0,
+      notice: expect.stringContaining(sentence),
+    });
+    expect(result.structuredContent).not.toHaveProperty('encodedNNumber');
+    const content = JSON.stringify(result.content);
+    expect(content).toContain(sentence);
+    expect(content).not.toContain('encodedNNumber');
+    expect(content).not.toContain('undefined');
+  });
+
+  it('joins the decode with the limit-clamp and stale-snapshot notices', async () => {
+    const handle = await getRegistryService().mirrorInstance.raw();
+    handle
+      .prepare(
+        "INSERT INTO registry_generation (id, owner, generation, loading, data_as_of) VALUES (1, 'test', 0, 0, ?)",
+      )
+      .run('2026-11-02');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-10T23:59:59Z'));
+    try {
+      const result = await runToolContract(searchRegistrationsTool, {
+        modeSCode: 'A4A638',
+        limit: 500,
+      });
+      const { notice } = z.object({ notice: z.string() }).parse(result.structuredContent);
+      const parts = [
+        'Requested limit 500; applied 200.',
+        'No registrations matched the supplied filters.',
+        N399WM_SENTENCE,
+        'The FAA registry snapshot is more than seven days old.',
+      ];
+      for (const part of parts) expect(notice).toContain(part);
+      const positions = parts.map((part) => notice.indexOf(part));
+      expect(positions).toEqual([...positions].sort((a, b) => a - b));
+      expect(result.structuredContent).toMatchObject({ encodedNNumber: 'N399WM' });
+      expect(JSON.stringify(result.content)).toContain(notice);
+    } finally {
+      vi.useRealTimers();
+      handle.exec('DELETE FROM registry_generation');
+    }
+  });
+});
+
+describe('faa_search_registrations engine, airworthiness and year filters on the wire', () => {
+  const newFilters = [
+    'engineManufacturerModelCode',
+    'airworthinessClass',
+    'yearManufacturedMin',
+    'yearManufacturedMax',
+  ];
+  const text = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    JSON.stringify(result.content);
+
+  it.each([
+    [{ engineManufacturerModelCode: 'IO520' }, 'invalid_engine_code', '17026'],
+    [{ airworthinessClass: '0' }, 'invalid_airworthiness_class', '4 Experimental'],
+    [
+      { yearManufacturedMin: 2015, yearManufacturedMax: 2008 },
+      'invalid_year_range',
+      'only one of the two bounds',
+    ],
+  ])('returns %j as %s with its recovery on both surfaces', async (filter, reason, hint) => {
+    const result = await runToolContract(searchRegistrationsTool, { ...filter, state: 'WA' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason, recovery: { hint: expect.stringContaining(hint) } },
+      },
+    });
+    expect(text(result)).toContain(reason);
+    expect(text(result)).toContain(hint);
+  });
+
+  it.each([
+    ['yearManufacturedMin', 75],
+    ['yearManufacturedMin', 1975.5],
+    ['yearManufacturedMax', 10000],
+    ['yearManufacturedMax', 'abc'],
+  ])('rejects %s %j at the schema', async (field, value) => {
+    const result = await runToolContract(searchRegistrationsTool, {
+      state: 'WA',
+      [field]: value as unknown as number,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    expect(text(result)).toContain(field);
+  });
+
+  it('repairs a year sent as a string and codes sent as integers', async () => {
+    const result = await runToolContract(searchRegistrationsTool, {
+      yearManufacturedMin: '2008' as unknown as number,
+      engineManufacturerModelCode: 41514 as unknown as string,
+      airworthinessClass: 1 as unknown as string,
+    });
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ totalCount: 2 });
+    // An integer drops a leading zero, which the five-digit rule then rejects.
+    const zero = await runToolContract(searchRegistrationsTool, {
+      engineManufacturerModelCode: 1234 as unknown as string,
+    });
+    expect(zero.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_engine_code' } },
+    });
+  });
+
+  it('advertises four-digit integer year bounds and unrestricted code strings', () => {
+    const schema = z.toJSONSchema(searchRegistrationsTool.input, { io: 'input' });
+    for (const field of ['yearManufacturedMin', 'yearManufacturedMax']) {
+      expect(schema.properties?.[field]).toMatchObject({
+        type: 'integer',
+        minimum: 1000,
+        maximum: 9999,
+      });
+    }
+    for (const field of ['engineManufacturerModelCode', 'airworthinessClass']) {
+      expect(schema.properties?.[field]).toMatchObject({ type: 'string' });
+      expect(schema.properties?.[field]).not.toHaveProperty('pattern');
+      expect(schema.properties?.[field]).not.toHaveProperty('enum');
+    }
+    for (const field of newFilters) expect(schema.required ?? []).not.toContain(field);
+  });
+
+  it('names every new filter in the no_filters and owner_search_disabled recoveries', async () => {
+    for (const [input, reason] of [
+      [{ engineManufacturerModelCode: ' ', airworthinessClass: '' }, 'no_filters'],
+      [{ ownerName: 'PUBLIC' }, 'owner_search_disabled'],
+    ] as const) {
+      const result = await runToolContract(searchRegistrationsTool, input);
+      expect(result.structuredContent).toMatchObject({ error: { data: { reason } } });
+      const { hint } = z
+        .object({
+          error: z.object({ data: z.object({ recovery: z.object({ hint: z.string() }) }) }),
+        })
+        .parse(result.structuredContent).error.data.recovery;
+      for (const field of newFilters) {
+        expect(hint, reason).toContain(field);
+        expect(text(result), reason).toContain(field);
+      }
+    }
+  });
+
+  it('pages each filter alone and beside a make/model term with matching totals', async () => {
+    for (const filter of [
+      { engineManufacturerModelCode: '41514' },
+      { airworthinessClass: '1', makeModel: 'cessna' },
+      { yearManufacturedMin: 2000, makeModel: '172' },
+    ]) {
+      const first = await runToolContract(searchRegistrationsTool, { ...filter, limit: 1 });
+      expect(first.structuredContent, JSON.stringify(filter)).toMatchObject({
+        totalCount: 2,
+        nextOffset: 1,
+        registrations: [{ nNumber: '12345' }],
+      });
+      expect(text(first)).toContain('offset: 1');
+      const last = await runToolContract(searchRegistrationsTool, {
+        ...filter,
+        limit: 1,
+        offset: 1,
+      });
+      expect(last.structuredContent).toMatchObject({
+        totalCount: 2,
+        registrations: [{ nNumber: '5RP' }],
+      });
+      expect(last.structuredContent).not.toHaveProperty('nextOffset');
+    }
+  });
+
+  it('never returns a blank year for a max-only bound', async () => {
+    const result = await runToolContract(searchRegistrationsTool, { yearManufacturedMax: 2010 });
+    expect(result.structuredContent).toMatchObject({
+      totalCount: 1,
+      registrations: [{ nNumber: '12345', yearManufactured: 2008 }],
+    });
+    expect(text(result)).not.toMatch(/N105HH|N99SP/);
+  });
+
+  it('carries the stored engine code and class on both surfaces and omits blanks', async () => {
+    const handle = await getRegistryService().mirrorInstance.raw();
+    handle.exec(`
+      UPDATE registration SET eng_mfr_mdl_code = '01234', airworthiness_class_code = '4'
+      WHERE n_number = '105HH';
+    `);
+    try {
+      const result = await runToolContract(searchRegistrationsTool, {
+        airworthinessClass: ' 4 ',
+        engineManufacturerModelCode: ' 01234 ',
+      });
+      expect(result.structuredContent).toMatchObject({
+        totalCount: 1,
+        registrations: [
+          {
+            nNumber: '105HH',
+            engineManufacturerModelCode: '01234',
+            airworthinessClass: { code: '4', label: 'Experimental' },
+          },
+        ],
+      });
+      expect(text(result)).toContain('Engine mfr/model code: 01234');
+      expect(text(result)).toContain('Airworthiness class: Experimental (4)');
+      const sparse = await runToolContract(searchRegistrationsTool, { modeSCode: '99FACE' });
+      const [row] = z
+        .object({ registrations: z.array(z.record(z.string(), z.unknown())) })
+        .parse(sparse.structuredContent).registrations;
+      expect(row).toMatchObject({ nNumber: '99SP' });
+      expect(row).not.toHaveProperty('engineManufacturerModelCode');
+      expect(row).not.toHaveProperty('airworthinessClass');
+      expect(text(sparse)).not.toMatch(/Engine mfr\/model code|Airworthiness class/);
+    } finally {
+      handle.exec(`
+        UPDATE registration SET eng_mfr_mdl_code = NULL, airworthiness_class_code = NULL
+        WHERE n_number = '105HH';
+      `);
+    }
+  });
+});
+
 describe('SDK v2 advertised tool schemas', () => {
   it('keeps every root input closed and reserves error for the framework envelope', () => {
     for (const definition of allToolDefinitions) {
@@ -803,5 +1097,228 @@ describe('SDK v2 advertised tool schemas', () => {
         expect(schema.properties?.[field]).not.toHaveProperty('pattern');
       }
     }
+  });
+});
+
+/**
+ * A builder name that reorders the registrant's name, classified by a real
+ * rebuild of its own index and read back through every tool. The shared
+ * fixture service is restored afterwards.
+ */
+describe('builder name withheld by a rebuild', () => {
+  const builderPath = tempDbPath();
+  let sharedPath: string;
+  const typeCodes = (result: { structuredContent?: unknown }) =>
+    z
+      .object({ aircraftTypes: z.array(z.object({ code: z.string() })) })
+      .parse(result.structuredContent)
+      .aircraftTypes.map(({ code }) => code);
+
+  beforeAll(async () => {
+    sharedPath = await currentIndexPath();
+    await useService(true, builderPath);
+    const zip = makeZip([
+      { name: 'ENGINE.txt', data: Buffer.from('CODE,MFR,MODEL\n') },
+      { name: 'RESERVED.txt', data: Buffer.from('N-NUMBER\n') },
+      {
+        name: 'ACFTREF.txt',
+        data: Buffer.from(
+          [
+            'CODE,MFR,MODEL,TYPE-ACFT,BUILD-CERT-IND',
+            '056TEST,JOHN A SMITH,JS-1,4,1',
+            '056TES2,AAA PUBLIC WORKS,AP-1,4,1',
+            '056TES3,ZACH Q YOUNG,AA-1,4,1',
+          ].join('\n'),
+        ),
+      },
+      {
+        name: 'DEREG.txt',
+        data: Buffer.from(
+          'N-NUMBER,MFR-MDL-CODE,NAME,CANCEL-DATE\n44TS,056TEST,EARLIER OWNER,20200615\n',
+        ),
+      },
+      {
+        name: 'MASTER.txt',
+        data: Buffer.from(
+          [
+            'N-NUMBER,MFR MDL CODE,NAME,TYPE REGISTRANT,STATE,KIT MFR,KIT MODEL',
+            '7TS,056TEST,SMITH JOHN A,1,WA,JOHN A SMITH,JS-1',
+            '9TS,056TEST,DOE JANE,1,OR,EXAMPLE KIT CO,JS-1',
+            '8TS,056TES2,PUBLIC OWNER,1,WA,,',
+            '6TS,056TES3,YOUNG ZACH Q,1,WA,,',
+          ].join('\n'),
+        ),
+      },
+    ]);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(zip));
+    try {
+      await getRegistryService().mirrorInstance.runSync({ mode: 'init' });
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  afterAll(() => useService(true, sharedPath));
+
+  it('withholds the name from output, matching, counts, ordering and a repeated kit manufacturer', async () => {
+    const owner = await runToolContract(lookupRegistrationTool, { nNumber: 'N7TS' });
+    expect(owner.isError, surfaces(owner)).not.toBe(true);
+    expect(owner.structuredContent).toMatchObject({
+      model: 'JS-1',
+      manufacturerModelCode: '056TEST',
+    });
+    expect(owner.structuredContent).not.toHaveProperty('make');
+    expect(owner.structuredContent).not.toHaveProperty('kitManufacturer');
+    const otherOwner = await runToolContract(lookupRegistrationTool, { nNumber: 'N9TS' });
+    expect(otherOwner.structuredContent).toMatchObject({ kitManufacturer: 'EXAMPLE KIT CO' });
+    expect(otherOwner.structuredContent).not.toHaveProperty('make');
+    const type = await runToolContract(getAircraftTypeTool, { code: '056TEST' });
+    expect(type.structuredContent).toMatchObject({ code: '056TEST', model: 'JS-1' });
+    expect(type.structuredContent).not.toHaveProperty('manufacturer');
+    const status = await runToolContract(getRegistrationStatusTool, { nNumber: 'N44TS' });
+    expect(status.structuredContent).toMatchObject({ recordType: 'deregistered', model: 'JS-1' });
+    expect(status.structuredContent).not.toHaveProperty('make');
+    const resource = await registrationResource.handler(
+      { nNumber: '7TS' },
+      createMockContext({ errors: registrationResource.errors }),
+    );
+    expect(registrationResource.output?.parse(resource)).toMatchObject({ model: 'JS-1' });
+    for (const result of [owner, otherOwner, type, status]) {
+      expect(surfaces(result)).not.toContain('SMITH');
+    }
+    expect(JSON.stringify(resource)).not.toContain('SMITH');
+
+    for (const makeModel of ['smith john', 'john a smith']) {
+      const hidden = await runToolContract(searchRegistrationsTool, { makeModel });
+      expect(hidden.structuredContent).toMatchObject({ totalCount: 0, registrations: [] });
+    }
+    const hiddenType = await runToolContract(searchAircraftTypesTool, { query: 'smith john' });
+    expect(hiddenType.structuredContent).toMatchObject({ totalCount: 0, aircraftTypes: [] });
+
+    for (const input of [{ makeModel: 'js-1' }, { manufacturerModelCode: '056TEST' }]) {
+      const found = await runToolContract(searchRegistrationsTool, input);
+      expect(found.structuredContent).toMatchObject({
+        totalCount: 2,
+        registrations: [{ nNumber: '7TS' }, { nNumber: '9TS' }],
+      });
+      expect(surfaces(found)).not.toContain('SMITH');
+    }
+    const byModel = await runToolContract(searchAircraftTypesTool, { query: 'js-1' });
+    expect(byModel.structuredContent).toMatchObject({
+      totalCount: 1,
+      aircraftTypes: [{ code: '056TEST' }],
+    });
+    // By name the two withheld codes sort 056TEST, 056TES3; by model, the reverse.
+    const browse = await runToolContract(searchAircraftTypesTool, { aircraftType: '4' });
+    expect(browse.structuredContent).toMatchObject({ totalCount: 3 });
+    expect(typeCodes(browse).filter((code) => code !== '056TES2')).toEqual(['056TES3', '056TEST']);
+    expect(surfaces(browse)).toContain('AAA PUBLIC WORKS');
+    for (const result of [byModel, browse]) {
+      expect(surfaces(result)).not.toContain('SMITH');
+      expect(surfaces(result)).not.toContain('YOUNG');
+    }
+  });
+
+  it('shows and matches the name with redaction off', async () => {
+    await useService(false, builderPath);
+    const owner = await runToolContract(lookupRegistrationTool, { nNumber: 'N7TS' });
+    expect(owner.structuredContent).toMatchObject({
+      make: 'JOHN A SMITH',
+      kitManufacturer: 'JOHN A SMITH',
+    });
+    const byName = await runToolContract(searchRegistrationsTool, { makeModel: 'smith john' });
+    expect(byName.structuredContent).toMatchObject({ totalCount: 2 });
+    const browse = await runToolContract(searchAircraftTypesTool, { aircraftType: '4' });
+    expect(typeCodes(browse)).toEqual(['056TES2', '056TEST', '056TES3']);
+    expect(surfaces(browse)).toContain('JOHN A SMITH');
+    expect(
+      (await runToolContract(searchAircraftTypesTool, { query: 'smith john' })).structuredContent,
+    ).toMatchObject({ totalCount: 1 });
+  });
+});
+
+/**
+ * Designator spellings on the wire, over an index of their own: joined and
+ * hyphenated forms return the same rows on both surfaces, text with no letter or
+ * digit returns an empty page, an expanded designator never matches a withheld
+ * builder name, and both searches advertise the spelling-variant limit. The
+ * shared fixture service is restored afterwards.
+ */
+describe('designator spellings on the wire', () => {
+  const designatorPath = tempDbPath();
+  let sharedPath: string;
+  const searches = [
+    ['faa_search_registrations', searchRegistrationsTool, 'makeModel', 'registrations', 'nNumber'],
+    ['faa_search_aircraft_types', searchAircraftTypesTool, 'query', 'aircraftTypes', 'code'],
+  ] as const;
+
+  beforeAll(async () => {
+    sharedPath = await currentIndexPath();
+    await buildFixtureDb(designatorPath);
+    await useService(true, designatorPath);
+    const handle = await getRegistryService().mirrorInstance.raw();
+    handle.exec(`
+      INSERT INTO aircraft_ref (code, mfr, model, builder_cert_code, manufacturer_redacted) VALUES
+        ('7101001', 'PIPER', 'PA-28-181', '0', 0),
+        ('0560008', 'JOHN SMITH', 'RV-8', '1', 1),
+        ('0560009', 'VANS AIRCRAFT', 'RV-8', '1', 0);
+      INSERT INTO aircraft_ref_fts (code, mfr, model) VALUES
+        ('7101001', 'PIPER', 'PA-28-181'),
+        ('0560008', 'JOHN SMITH', 'RV-8'),
+        ('0560009', 'VANS AIRCRAFT', 'RV-8');
+      INSERT INTO registration (n_number, mfr_mdl_code, make, model) VALUES
+        ('281PA', '7101001', 'PIPER', 'PA-28-181'),
+        ('8RV', '0560008', 'JOHN SMITH', 'RV-8'),
+        ('9RV', '0560009', 'VANS AIRCRAFT', 'RV-8');
+    `);
+  });
+
+  afterAll(() => useService(true, sharedPath));
+
+  it.each(searches)(
+    '%s returns the same rows for PA28 and PA-28',
+    async (_, definition, field, key, id) => {
+      const joined = await runToolContract(definition, { [field]: 'PA28' });
+      const hyphenated = await runToolContract(definition, { [field]: 'PA-28' });
+      expect(joined.isError, surfaces(joined)).not.toBe(true);
+      expect(joined.structuredContent).toMatchObject({
+        totalCount: 1,
+        [key]: [{ [id]: key === 'registrations' ? '281PA' : '7101001' }],
+      });
+      expect(joined.structuredContent).toEqual(hyphenated.structuredContent);
+      expect(joined.content).toEqual(hyphenated.content);
+      expect(JSON.stringify(joined.content)).toContain('PA-28-181');
+    },
+  );
+
+  it.each(searches)(
+    '%s returns an empty page for text with no letter or digit',
+    async (_, definition, field, key) => {
+      for (const text of ['-', '- /']) {
+        const result = await runToolContract(definition, { [field]: text });
+        expect(result.isError, surfaces(result)).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({ totalCount: 0, [key]: [] });
+        expect(JSON.stringify(result.content)).toContain('No matching');
+      }
+    },
+  );
+
+  it.each(searches)(
+    '%s never matches a withheld builder name through an expanded designator',
+    async (_, definition, field) => {
+      const hidden = await runToolContract(definition, { [field]: 'smith RV8' });
+      expect(hidden.structuredContent).toMatchObject({ totalCount: 0 });
+      const both = await runToolContract(definition, { [field]: 'RV8' });
+      expect(both.structuredContent).toMatchObject({ totalCount: 2 });
+      expect(surfaces(both)).toContain('VANS AIRCRAFT');
+      expect(surfaces(both)).not.toContain('SMITH');
+    },
+  );
+
+  it.each(searches)('%s advertises its spelling-variant limit', (_, definition, field) => {
+    const schema = z.toJSONSchema(definition.input);
+    expect(schema.properties?.[field]).toMatchObject({
+      description: expect.stringContaining(`up to ${DESIGNATOR_SPELLING_BUDGET} spelling variants`),
+    });
   });
 });

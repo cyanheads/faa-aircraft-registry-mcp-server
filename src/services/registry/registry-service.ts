@@ -429,6 +429,8 @@ export class RegistryService {
       status: coded(str(row, 'status_code'), decodeStatusCode),
       modeSCodeHex: str(row, 'mode_s_code_hex'),
       serialNumber: str(row, 'serial_number'),
+      engineManufacturerModelCode: str(row, 'eng_mfr_mdl_code'),
+      airworthinessClass: coded(str(row, 'airworthiness_class_code'), decodeAirworthinessClass),
       ownerName: this.redactOwnerPii ? undefined : str(row, 'owner_name'),
     });
   }

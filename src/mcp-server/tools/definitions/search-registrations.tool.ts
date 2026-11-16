@@ -1,6 +1,7 @@
 /**
  * @fileoverview faa_search_registrations — search active registrations by owner
- * name, make/model, exact manufacturer/model code, state, aircraft type, or Mode S code. FTS5 over the local
+ * name, make/model, exact manufacturer/model or engine code, serial number,
+ * state, aircraft type, airworthiness class, manufacture year, or Mode S code. FTS5 over the local
  * on-disk index; results are decoded summaries carrying N-numbers for follow-up
  * faa_lookup_registration calls. Free-text terms are column-scoped, so makeModel
  * matches make/model only and never owner or city. Owner-name search is disabled
@@ -12,6 +13,12 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { decodeModeSCode } from '@/services/registry/mode-s.js';
+import {
+  DESIGNATOR_SPELLING_BUDGET,
+  displayNNumber,
+  normalizeExactFilter,
+} from '@/services/registry/normalize.js';
 import { getRegistryService } from '@/services/registry/registry-service.js';
 import { mirrorLoadingError } from '../../_mirror-errors.js';
 import { codedValueSchema } from './_schemas.js';
@@ -43,6 +50,15 @@ const registrationSummarySchema = z
     aircraftType: codedValueSchema.optional().describe('Aircraft type as code + label.'),
     status: codedValueSchema.optional().describe('Registration status as code + label.'),
     modeSCodeHex: z.string().optional().describe('Mode S code in hex (ICAO 24-bit address).'),
+    engineManufacturerModelCode: z
+      .string()
+      .optional()
+      .describe(
+        'FAA engine manufacturer/model code (five digits); pass it as engineManufacturerModelCode to find registrations with the same engine.',
+      ),
+    airworthinessClass: codedValueSchema
+      .optional()
+      .describe('Airworthiness class (Standard, Experimental, …) as code + label.'),
     ownerName: z
       .string()
       .optional()
@@ -53,10 +69,36 @@ const registrationSummarySchema = z
     'A decoded registration summary; use nNumber with faa_lookup_registration for full detail.',
   );
 
+/**
+ * The sentence an unmatched Mode S search adds to its notice, and the N-number
+ * the code encodes when it encodes one. It states only the address mapping, so
+ * it stays true whichever filter emptied the page.
+ */
+function describeUnmatchedModeS(code: string): { sentence: string; encodedNNumber?: string } {
+  const decoded = decodeModeSCode(code);
+  switch (decoded.kind) {
+    case 'n_number': {
+      const nNumber = displayNNumber(decoded.nNumber);
+      return {
+        sentence: `Mode S code ${code} encodes ${nNumber}. Call faa_get_registration_status with ${nNumber} for its current state and cancellation history.`,
+        encodedNNumber: nNumber,
+      };
+    }
+    case 'us_unmapped':
+      return {
+        sentence: `Mode S code ${code} is in the US allocation (A00000–AFFFFF) but encodes no N-number.`,
+      };
+    case 'non_us':
+      return {
+        sentence: `Mode S code ${code} is outside the US allocation (A00000–AFFFFF) and encodes no N-number.`,
+      };
+  }
+}
+
 export const searchRegistrationsTool = tool('faa_search_registrations', {
   title: 'faa-aircraft-registry-mcp-server: search registrations',
   description:
-    'Search active US civil aircraft registrations by owner name, make/model, exact manufacturerModelCode, serial number, state, aircraft type, or Mode S (hex) code. Discover codes with faa_search_aircraft_types and get full records with faa_lookup_registration. Filters are AND-combined and at least one is required. Owner-name search is available on deployments that expose owner PII. Responses report totalCount across all pages and return nextOffset when more matches remain.',
+    'Search active US civil aircraft registrations by owner name, make/model, exact manufacturerModelCode or engineManufacturerModelCode, serial number, state, aircraft type, airworthiness class, manufacture-year range, or Mode S (hex) code. Discover codes with faa_search_aircraft_types and get full records with faa_lookup_registration. Filters are AND-combined and at least one is required. Owner-name search is available on deployments that expose owner PII. Responses report totalCount across all pages and return nextOffset when more matches remain.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -68,7 +110,7 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       .string()
       .optional()
       .describe(
-        'Aircraft make or model. Each search term matches a token prefix, such as 172 matching 172S.',
+        `Aircraft make or model. Each search term matches a token prefix, such as 172 matching 172S, and hyphenated and joined designators match each other, such as PA28 and PA-28. A search adds up to ${DESIGNATOR_SPELLING_BUDGET} spelling variants, in term order; a term whose variants exceed what remains matches as typed.`,
       ),
     serialNumber: z
       .string()
@@ -98,7 +140,37 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       .string()
       .optional()
       .describe(
-        'Six hexadecimal characters for the Mode S code (ICAO 24-bit address), exact match. Trimmed and uppercased; blank is unset.',
+        'Six hexadecimal characters for the Mode S code (ICAO 24-bit address), exact match. Trimmed and uppercased; blank is unset. When nothing matches, the notice says which N-number a US address encodes and encodedNNumber carries it for faa_get_registration_status.',
+      ),
+    engineManufacturerModelCode: z
+      .string()
+      .optional()
+      .describe(
+        'Exact FAA engine manufacturer/model code: five digits such as 17026, trimmed; blank is unset. Leading zeros are significant. Take it from faa_lookup_registration or a search result.',
+      ),
+    airworthinessClass: z
+      .string()
+      .optional()
+      .describe(
+        'FAA airworthiness class code, exact match: 1 Standard, 2 Limited, 3 Restricted, 4 Experimental, 5 Provisional, 6 Multiple, 7 Primary, 8 Special Flight Permit, 9 Light Sport. Trimmed; blank is unset.',
+      ),
+    yearManufacturedMin: z
+      .number()
+      .int()
+      .min(1000)
+      .max(9999)
+      .optional()
+      .describe(
+        'Earliest year manufactured, inclusive (four-digit year). Registrations with no recorded year never match.',
+      ),
+    yearManufacturedMax: z
+      .number()
+      .int()
+      .min(1000)
+      .max(9999)
+      .optional()
+      .describe(
+        'Latest year manufactured, inclusive (four-digit year). Registrations with no recorded year never match.',
       ),
     limit: searchLimitSchema,
     offset: z
@@ -117,7 +189,15 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       .describe('Matching registration summaries for this page (up to limit).'),
   }),
 
-  enrichment: searchEnrichment,
+  enrichment: {
+    ...searchEnrichment,
+    encodedNNumber: z
+      .string()
+      .optional()
+      .describe(
+        'N-number the searched modeSCode encodes, such as N399WM. Present only when nothing matched and the code is a US address from A00001 to ADF7C7; check it with faa_get_registration_status.',
+      ),
+  },
 
   errors: [
     mirrorLoadingError,
@@ -152,18 +232,42 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       recovery: 'Provide aircraftType as 1–9, H (Hybrid Lift) or O (Other).',
     },
     {
+      reason: 'invalid_engine_code',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'engineManufacturerModelCode is not five digits after trimming.',
+      recovery:
+        'Pass the five-digit engineManufacturerModelCode, such as 17026, from faa_lookup_registration or a search result, not an engine model name.',
+    },
+    {
+      reason: 'invalid_airworthiness_class',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'airworthinessClass is not one digit from 1 to 9.',
+      recovery:
+        'Provide airworthinessClass as 1 Standard, 2 Limited, 3 Restricted, 4 Experimental, 5 Provisional, 6 Multiple, 7 Primary, 8 Special Flight Permit, or 9 Light Sport.',
+    },
+    {
+      reason: 'invalid_year_range',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'yearManufacturedMin is later than yearManufacturedMax.',
+      recovery:
+        'Set yearManufacturedMin no later than yearManufacturedMax, or pass only one of the two bounds.',
+    },
+    {
       reason: 'owner_search_disabled',
       code: JsonRpcErrorCode.ValidationError,
       when: 'ownerName was supplied while owner-PII redaction is enabled on this deployment.',
       recovery:
-        'Drop the ownerName filter. Search by makeModel, manufacturerModelCode, serialNumber, state, aircraftType, or modeSCode.',
+        'Drop the ownerName filter. Search by makeModel, manufacturerModelCode, engineManufacturerModelCode, serialNumber, state, aircraftType, airworthinessClass, yearManufacturedMin, yearManufacturedMax, or modeSCode.',
     },
     {
       reason: 'no_filters',
       code: JsonRpcErrorCode.ValidationError,
       when: 'No search filter was supplied.',
       recovery:
-        'Provide at least one of makeModel, manufacturerModelCode, serialNumber, state, aircraftType, or modeSCode (or ownerName when owner PII is unredacted).',
+        'Provide at least one of makeModel, manufacturerModelCode, engineManufacturerModelCode, serialNumber, state, aircraftType, airworthinessClass, yearManufacturedMin, yearManufacturedMax, or modeSCode (or ownerName when owner PII is unredacted).',
     },
   ],
 
@@ -181,6 +285,9 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
     const state = input.state?.trim() || undefined;
     const aircraftType = input.aircraftType?.trim() || undefined;
     const modeSCode = input.modeSCode?.trim() || undefined;
+    const engineManufacturerModelCode = input.engineManufacturerModelCode?.trim() || undefined;
+    const airworthinessClass = input.airworthinessClass?.trim() || undefined;
+    const { yearManufacturedMin, yearManufacturedMax } = input;
 
     if (
       !ownerName &&
@@ -189,7 +296,11 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       !serialNumber &&
       !state &&
       !aircraftType &&
-      !modeSCode
+      !modeSCode &&
+      !engineManufacturerModelCode &&
+      !airworthinessClass &&
+      yearManufacturedMin === undefined &&
+      yearManufacturedMax === undefined
     ) {
       throw ctx.fail('no_filters', 'At least one search filter is required.');
     }
@@ -205,6 +316,10 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
         ...(state ? { state } : {}),
         ...(aircraftType ? { aircraftType } : {}),
         ...(modeSCode ? { modeSCode } : {}),
+        ...(engineManufacturerModelCode ? { engineManufacturerModelCode } : {}),
+        ...(airworthinessClass ? { airworthinessClass } : {}),
+        ...(yearManufacturedMin !== undefined ? { yearManufacturedMin } : {}),
+        ...(yearManufacturedMax !== undefined ? { yearManufacturedMax } : {}),
         limit,
         offset: input.offset,
       },
@@ -214,6 +329,12 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       },
     );
 
+    const noMatches =
+      'No registrations matched the supplied filters. Broaden the make/model terms, discover manufacturerModelCode with faa_search_aircraft_types, verify the state or Mode S code, or remove a filter.';
+    // The search already validated modeSCode; normalizing again yields the uppercase form.
+    const unmatchedModeS =
+      page.totalCount === 0 ? normalizeExactFilter(modeSCode, 'modeSCode') : undefined;
+    const modeS = unmatchedModeS ? describeUnmatchedModeS(unmatchedModeS) : undefined;
     enrichSearchPage(
       ctx,
       'faa_search_registrations',
@@ -221,8 +342,9 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       input.offset,
       dataAsOf,
       notice,
-      'No registrations matched the supplied filters. Broaden the make/model terms, discover manufacturerModelCode with faa_search_aircraft_types, verify the state or Mode S code, or remove a filter.',
+      modeS ? `${noMatches} ${modeS.sentence}` : noMatches,
     );
+    if (modeS?.encodedNNumber) ctx.enrich({ encodedNNumber: modeS.encodedNNumber });
 
     return { registrations: page.items };
   },
@@ -243,8 +365,12 @@ export const searchRegistrationsTool = tool('faa_search_registrations', {
       if (r.serialNumber) facts.push(`Serial: ${escapeMarkdownInline(r.serialNumber)}`);
       if (r.manufacturerModelCode)
         facts.push(`Mfr/model code: ${escapeMarkdownInline(r.manufacturerModelCode)}`);
+      if (r.engineManufacturerModelCode)
+        facts.push(`Engine mfr/model code: ${escapeMarkdownInline(r.engineManufacturerModelCode)}`);
       const type = coded(r.aircraftType);
       if (type) facts.push(`Type: ${escapeMarkdownInline(type)}`);
+      const airworthiness = coded(r.airworthinessClass);
+      if (airworthiness) facts.push(`Airworthiness class: ${escapeMarkdownInline(airworthiness)}`);
       const status = coded(r.status);
       if (status) facts.push(`Status: ${escapeMarkdownInline(status)}`);
       if (r.state) facts.push(`State: ${escapeMarkdownInline(r.state)}`);

@@ -1,6 +1,7 @@
 /** @fileoverview Indexed registry search and shared manufacturer visibility policy. */
 
-import type { SqliteHandle } from '@cyanheads/mcp-ts-core/mirror';
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import type { SqliteHandle, SqlValue } from '@cyanheads/mcp-ts-core/mirror';
 import { cleanField, normalizeExactFilter, toFtsMatch } from './normalize.js';
 import {
   AIRCRAFT_REF_FTS,
@@ -45,7 +46,7 @@ function readPage(
     orderBy: string;
   },
   conditions: string[],
-  params: string[],
+  params: SqlValue[],
   { limit, offset }: { limit: number; offset: number },
 ): SearchPage<Row> {
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -67,7 +68,7 @@ function readPage(
 
 function addMatch(
   conditions: string[],
-  params: string[],
+  params: SqlValue[],
   kind: 'registrations' | 'types',
   match: string,
   redact: boolean,
@@ -94,16 +95,30 @@ export function readRegistrations(
   manufacturerModelCode: string | undefined,
 ): SearchPage<Row> {
   const conditions: string[] = [];
-  const params: string[] = [];
+  const params: SqlValue[] = [];
   const state = normalizeExactFilter(filters.state, 'state');
   const aircraftType = normalizeExactFilter(filters.aircraftType, 'aircraftType');
   const modeSCode = normalizeExactFilter(filters.modeSCode, 'modeSCode');
+  const engineCode = normalizeExactFilter(
+    filters.engineManufacturerModelCode,
+    'engineManufacturerModelCode',
+  );
+  const airworthinessClass = normalizeExactFilter(filters.airworthinessClass, 'airworthinessClass');
+  const { yearManufacturedMin: minYear, yearManufacturedMax: maxYear } = filters;
+  if (minYear !== undefined && maxYear !== undefined && minYear > maxYear) {
+    throw validationError(
+      `Invalid year range: yearManufacturedMin ${minYear} is later than yearManufacturedMax ${maxYear}.`,
+      { reason: 'invalid_year_range' },
+    );
+  }
   const exact: [string, string | undefined][] = [
     ['r.state = ?', state],
     ['r.mfr_mdl_code = ?', manufacturerModelCode],
     ['r.aircraft_type_code = ?', aircraftType],
     ['r.mode_s_code_hex = ?', modeSCode],
     ['r.serial_number = ? COLLATE NOCASE', cleanField(filters.serialNumber)],
+    ['r.eng_mfr_mdl_code = ?', engineCode],
+    ['r.airworthiness_class_code = ?', airworthinessClass],
   ];
   for (const [condition, value] of exact) {
     if (value) {
@@ -111,11 +126,20 @@ export function readRegistrations(
       params.push(value);
     }
   }
+  if (minYear !== undefined || maxYear !== undefined) {
+    // The FAA stores some blank years as 0, so a max-only range still needs a floor.
+    conditions.push('r.year_mfr >= ?');
+    params.push(minYear ?? 1);
+  }
+  if (maxYear !== undefined) {
+    conditions.push('r.year_mfr <= ?');
+    params.push(maxYear);
+  }
   const ownerName = redact ? undefined : filters.ownerName;
   const makeModelMatch = filters.makeModel
-    ? toFtsMatch(filters.makeModel, MAKE_MODEL_FTS_COLUMNS, true)
+    ? toFtsMatch(filters.makeModel, MAKE_MODEL_FTS_COLUMNS, 'designator')
     : undefined;
-  const ownerMatch = ownerName ? toFtsMatch(ownerName, OWNER_FTS_COLUMNS) : undefined;
+  const ownerMatch = ownerName ? toFtsMatch(ownerName, OWNER_FTS_COLUMNS, 'whole') : undefined;
   if ((filters.makeModel && !makeModelMatch) || (ownerName && !ownerMatch)) {
     conditions.push('0');
   } else {
@@ -139,7 +163,11 @@ export function readRegistrations(
   );
 }
 
-/** Read a type page ordered by public manufacturer, model and code. */
+/**
+ * Read a type page: named manufacturers first, then withheld ones, each group in
+ * public manufacturer, model and code order. A withheld name is NULL here, so it
+ * never decides a row's position.
+ */
 export function readAircraftTypes(
   handle: SqliteHandle,
   filters: AircraftTypeSearchFilters,
@@ -158,7 +186,7 @@ export function readAircraftTypes(
     params.push(category);
   }
   if (filters.query) {
-    const match = toFtsMatch(filters.query, AIRCRAFT_REF_FTS_COLUMNS, true);
+    const match = toFtsMatch(filters.query, AIRCRAFT_REF_FTS_COLUMNS, 'designator');
     if (match) addMatch(conditions, params, 'types', match, redact);
     else conditions.push('0');
   }
@@ -168,7 +196,7 @@ export function readAircraftTypes(
     {
       select: `ref.*, ${visibleManufacturer('ref.mfr', redact)} AS visible_make`,
       rowSource: `${AIRCRAFT_REF_TABLE} AS ref`,
-      orderBy: 'visible_make, ref.model, ref.code',
+      orderBy: 'visible_make IS NULL, visible_make, ref.model, ref.code',
     },
     conditions,
     params,

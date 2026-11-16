@@ -9,6 +9,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { DESIGNATOR_SPELLING_BUDGET } from '@/services/registry/normalize.js';
 import { getRegistryService } from '@/services/registry/registry-service.js';
 import { mirrorLoadingError } from '../../_mirror-errors.js';
 import { codedValueSchema } from './_schemas.js';
@@ -50,7 +51,7 @@ export const searchAircraftTypesTool = tool('faa_search_aircraft_types', {
       .string()
       .optional()
       .describe(
-        'Aircraft manufacturer or model. Each search term matches a token prefix, such as 172 matching 172S.',
+        `Aircraft manufacturer or model. Each search term matches a token prefix, such as 172 matching 172S, and hyphenated and joined designators match each other, such as PA28 and PA-28. A search adds up to ${DESIGNATOR_SPELLING_BUDGET} spelling variants, in term order; a term whose variants exceed what remains matches as typed.`,
       ),
     aircraftType: z
       .string()
