@@ -15,19 +15,20 @@ Use the FAA civil registry for registration records, aircraft type references, a
 
 - Take the model-series `code` from `faa_search_aircraft_types`, or `manufacturerModelCode` from a registration record. Pass it to `faa_get_aircraft_type` for reference specs or use it as the exact model filter in `faa_search_registrations`. The FAA aircraft type code classifies the kind of aircraft. The six-digit hexadecimal Mode S code identifies its ICAO 24-bit address.
 - Take the N-number from `faa_search_registrations` to `faa_lookup_registration` or `faa_get_registration_status`. It identifies the registration mark, which may be reassigned to another airframe.
+- Take the five-digit engine code from `faa_lookup_registration` or a search result summary, and send it as a string to `engineManufacturerModelCode` to find registrations with the same engine; leading zeros count. Airworthiness class is one code from 1 (Standard) to 9 (Light Sport); the year bounds are inclusive and never match a registration with no recorded year.
 - Keep a manufacturer's serial as a string, including leading zeros, punctuation, and internal spaces. An exact serial can match multiple aircraft. Narrow by a verified model code or corroborate with other identifiers before selecting a record.
 
 ## Gates
 
 - Check `dataAsOf` and the notice before making a current-state claim. With a stale or undated snapshot, report what the snapshot shows and qualify its freshness. If the mirror returns a loading or unavailable error, retry as directed or report that the registry could not be checked.
-- Treat `unknown` as absence from the queried snapshot. It does not establish whether the number was ever issued or is available for assignment. An empty active-registration search has narrower coverage than a status lookup for a specific N-number.
+- Treat `unknown` as absence from the queried snapshot. It does not establish whether the number was ever issued or is available for assignment. An empty active-registration search has narrower coverage than a status lookup for a specific N-number. When a Mode S search is empty, the notice names the N-number a US address encodes (also returned as `encodedNNumber`); check it with `faa_get_registration_status`. An address outside the US allocation, or inside it but unassigned, encodes none.
 - If owner search is disabled, use a non-owner identifier where available. A withheld or blank owner field provides no evidence of who owns the aircraft. A redacted builder name can also prevent a manufacturer-name match. Try a known model or exact code if available.
 
 ## Workflows
 
 ### Find registrations of a specific variant
 
-Start with `faa_search_aircraft_types` if you have a make or model name. Both aircraft type search and registration make/model search require every whitespace-separated term to match a token prefix. For example, `Cessna 172` can match `172S`. Use plain text and separate searches for alternatives. Boolean operators, wildcards, and quoted phrases do not act as query syntax. Where enabled, owner-name search matches whole tokens.
+Start with `faa_search_aircraft_types` if you have a make or model name. Both aircraft type search and registration make/model search require every whitespace-separated term to match a token prefix. For example, `Cessna 172` can match `172S`. Hyphenated and joined spellings of one designator (`PA-28`, `PA28`) find the same rows, so they need no separate searches; a joined digit run is never split. Use plain text and separate searches for alternatives that are not spellings of one designator. Boolean operators, wildcards, and quoted phrases do not act as query syntax. Where enabled, owner-name search matches whole tokens.
 
 Confirm the intended variant before using the returned model code to find active registrations. If several codes fit the request, preserve the ambiguity or search each applicable code. Use `faa_get_aircraft_type` for reference specifications and `faa_lookup_registration` for details about a particular returned N-number.
 

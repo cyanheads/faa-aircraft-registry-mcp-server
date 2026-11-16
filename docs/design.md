@@ -15,7 +15,7 @@ Releasable Aircraft Database, indexed on disk as SQLite + FTS5. Keyless, no runt
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `faa_lookup_registration` | The 80% tool. Decode one N-number to its full pre-joined record — aircraft make/model, engine, year, registered owner, airworthiness, and registration status. One call resolves the MASTER → ACFTREF → ENGINE join and decodes all coded fields. | `nNumber` (string, "N12345" or "12345") | `readOnlyHint: true`, `openWorldHint: false` |
-| `faa_search_registrations` | Search active registrations by exact serial or manufacturer/model code, make/model prefixes, state, aircraft type, Mode S code, or owner when unredacted. Filters are AND-combined; hidden manufacturer names cannot drive matches. Summaries carry serials, model codes, and N-numbers. | `ownerName?`, `makeModel?`, `manufacturerModelCode?`, `serialNumber?`, `state?`, `aircraftType?`, `modeSCode?`, `limit?`, `offset?` | `readOnlyHint: true`, `openWorldHint: false` |
+| `faa_search_registrations` | Search active registrations by exact serial, manufacturer/model code or engine code, make/model prefixes, state, aircraft type, airworthiness class, manufacture-year range, Mode S code, or owner when unredacted. Filters are AND-combined; hidden manufacturer names cannot drive matches. Summaries carry serials, model and engine codes, airworthiness class, and N-numbers. An unmatched Mode S search also names the N-number a US address encodes and returns it as `encodedNNumber`. | `ownerName?`, `makeModel?`, `manufacturerModelCode?`, `engineManufacturerModelCode?`, `serialNumber?`, `state?`, `aircraftType?`, `airworthinessClass?`, `yearManufacturedMin?`, `yearManufacturedMax?`, `modeSCode?`, `limit?`, `offset?` | `readOnlyHint: true`, `openWorldHint: false` |
 | `faa_search_aircraft_types` | Search the aircraft reference table by manufacturer/model name, category, or aircraft type to discover manufacturer-model codes and browse specs. Fills the discovery gap before `faa_get_aircraft_type`. | `query?`, `aircraftType?`, `category?`, `limit?`, `offset?` | `readOnlyHint: true`, `openWorldHint: false` |
 | `faa_get_aircraft_type` | Decode a 6–7-character manufacturer/model/series code to aircraft specs — make, model, category, aircraft type, engine type, engine count, seats, weight class, cruise speed, type-certificate data. | `code` (6–7-char alphanumeric) | `readOnlyHint: true`, `openWorldHint: false` |
 | `faa_get_registration_status` | Resolve current state in MASTER → RESERVED → DEREG order, with available cancellation history, aircraft identity, and export country. A cancellation's status describes its historical row. | `nNumber` (string, "N12345" or "12345") | `readOnlyHint: true`, `openWorldHint: false` |
@@ -35,9 +35,12 @@ in the service layer, common to every tool.
 | `faa_lookup_registration` | `not_found` | `NotFound` | N-number normalized and valid but no active MASTER record | Call `faa_get_registration_status` to check if it is deregistered or reserved, or `faa_search_registrations` to find the right N-number. |
 | `faa_lookup_registration` | `invalid_n_number` | `ValidationError` | N-number fails domain validation after normalization | Provide a valid US N-number (1–5 chars after an optional "N": leading digit 1–9, then digits, optionally one or two trailing letters; I and O unused). Example: N172SP. |
 | `faa_lookup_registration` | `owner_redacted` | *(not an error — `ownerRedacted: true` flag on success)* | — | — |
-| `faa_search_registrations` | `owner_search_disabled` | `ValidationError` | `ownerName` supplied while `FAA_REDACT_OWNER_PII` is on | Drop ownerName; search by makeModel, manufacturerModelCode, serialNumber, state, aircraftType, or modeSCode. |
-| `faa_search_registrations` | `no_filters` | `ValidationError` | No search filter supplied | Provide makeModel, manufacturerModelCode, serialNumber, state, aircraftType, or modeSCode (ownerName when PII is unredacted). |
+| `faa_search_registrations` | `owner_search_disabled` | `ValidationError` | `ownerName` supplied while `FAA_REDACT_OWNER_PII` is on | Drop ownerName; search by makeModel, manufacturerModelCode, engineManufacturerModelCode, serialNumber, state, aircraftType, airworthinessClass, yearManufacturedMin, yearManufacturedMax, or modeSCode. |
+| `faa_search_registrations` | `no_filters` | `ValidationError` | No search filter supplied | Provide makeModel, manufacturerModelCode, engineManufacturerModelCode, serialNumber, state, aircraftType, airworthinessClass, yearManufacturedMin, yearManufacturedMax, or modeSCode (ownerName when PII is unredacted). |
 | `faa_search_registrations` | `invalid_code` | `ValidationError` | manufacturerModelCode is malformed | Discover a 6–7-character alphanumeric code with `faa_search_aircraft_types`. |
+| `faa_search_registrations` | `invalid_engine_code` | `ValidationError` | engineManufacturerModelCode is not five digits | Pass the five-digit code from `faa_lookup_registration` or a search result, not an engine model name. |
+| `faa_search_registrations` | `invalid_airworthiness_class` | `ValidationError` | airworthinessClass is not one digit from 1 to 9 | Provide 1 Standard through 9 Light Sport. |
+| `faa_search_registrations` | `invalid_year_range` | `ValidationError` | yearManufacturedMin is later than yearManufacturedMax | Set the minimum no later than the maximum, or pass only one bound. |
 | `faa_search_aircraft_types` | `no_filters` | `ValidationError` | No search filter supplied | Provide a query, aircraftType, or category to search the reference table. |
 | `faa_get_aircraft_type` | `not_found` | `NotFound` | 6–7-char code well-formed but absent from ACFTREF | Use `faa_search_aircraft_types` to discover valid manufacturer-model codes by name. |
 | `faa_get_aircraft_type` | `invalid_code` | `ValidationError` | Code fails domain validation — not 6–7 uppercase alphanumeric characters | Use `faa_search_aircraft_types` to discover valid manufacturer-model codes by name. |
@@ -47,10 +50,15 @@ in the service layer, common to every tool.
 
 Exact search filters normalize trim/case in the service: `state` is two ASCII letters (including
 territories and military postal codes), `modeSCode` is six hex characters, `aircraftType` is
-1–9/H/O, and `category` is 1–3. Malformed nonblank values raise `ValidationError` with
-`invalid_state`, `invalid_mode_s_code`, `invalid_aircraft_type` or `invalid_category` and
+1–9/H/O, `category` is 1–3, `engineManufacturerModelCode` is five digits (leading zeros
+significant), and `airworthinessClass` is one digit from 1 to 9. Malformed nonblank values raise
+`ValidationError` with `invalid_state`, `invalid_mode_s_code`, `invalid_aircraft_type`,
+`invalid_category`, `invalid_engine_code` or `invalid_airworthiness_class` and
 recovery guidance; advertised string schemas remain unchanged. Blank filters are unset;
-well-shaped absent values return an empty success.
+well-shaped absent values return an empty success. `yearManufacturedMin` and
+`yearManufacturedMax` are inclusive integers from 1000 to 9999; a minimum later than the maximum
+raises `invalid_year_range`. Registrations with a NULL year or the FAA blank `0` never match
+any year bound, including a maximum alone.
 `manufacturerModelCode` trims and uppercases, reuses the 6–7-character alphanumeric code
 grammar, and queries the existing `mfr_mdl_code` index exactly. A code alone is a sufficient
 filter. Discover codes with `faa_search_aircraft_types`, search registrations by code, then
@@ -58,8 +66,33 @@ use `faa_lookup_registration` for details; names alone can span distinct referen
 
 `serialNumber` trims surrounding whitespace and compares exactly with NOCASE collation,
 using a matching index. It preserves leading zeros, punctuation, and internal spaces; a
-serial can belong to multiple manufacturers. Make/model text uses token prefixes, while
-owner text keeps whole-token matching. Both searches count and page the same visible matches.
+serial can belong to multiple manufacturers. Make/model text (`makeModel`, and `query` on
+`faa_search_aircraft_types`) uses token prefixes, while owner text keeps whole-token matching as
+typed, with no expansion. A make/model term with 1–4 boundaries (a separator, or a letter/digit
+change) is also matched under its other join/split spellings, so `PA28` and `PA-28`, `PA-32R` and
+`PA32R`, `UH-1H` and `UH1H` find the same rows. The term as typed is always one of the
+alternatives, so no row the previous matching found is lost; a term with no boundary or more than
+four matches as typed, and a joined digit run is never split (`PA28181` does not find
+`PA-28-181`). A search adds at most 20 spelling variants, in term order; a term whose variants
+exceed what remains matches as typed, while a later term that fits still expands. In both modes a
+term with no letter or digit is ignored (`cessna - 172` = `cessna 172`; owner `JOHNSON & JOHNSON`
+searches `JOHNSON`) and a repeated term is matched once (in make/model, any spelling of the same
+designator is a repeat). Expanded spellings stay inside the withheld-builder scope: under
+redaction no withheld builder name is matched through an expanded designator. Both searches count
+and page the same visible matches.
+
+Decision: the expansion is bounded by a variant budget rather than an input limit. Every
+realistic search stays fully expanded, it bounds the added query work, and the input schema is
+unchanged.
+
+Mode S decode: when a `faa_search_registrations` search carrying `modeSCode` returns
+`totalCount` 0, whatever the other filters, the no-match notice gains one sentence from a pure
+ICAO 24-bit decoder (`src/services/registry/mode-s.ts`). Three branches: A00001–ADF7C7 map one
+to one onto N1–N99999, so the notice names the N-number, points to
+`faa_get_registration_status` for its current state and cancellation history, and the result
+carries `encodedNNumber`; A00000 and ADF7C8–AFFFFF lie in the US allocation but encode no
+N-number; anything outside A00000–AFFFFF is not a US address. The sentence states only the
+address mapping, so it holds whichever filter emptied the page.
 
 The cold-mirror case (a never-initialized index) is a service-layer `ServiceUnavailable` with
 recovery `Run the mirror:init script to build the local FAA registry index before querying.` —
@@ -154,7 +187,7 @@ and mostly not bulk-published. The `faa-` name makes the scope obvious.
   result set as complete. When more matches remain, enrichment reports `truncated`, `shown`,
   `cap`, and the `nextOffset` for the next page. Every disclosed
   omission therefore has a retrieval path — the ordering is total and stable across pages
-  (`registration.rowid` for registrations, visible manufacturer, model, and code for aircraft types),
+  (`registration.rowid` for registrations; for aircraft types, named manufacturers first, then withheld ones, each by model and code),
   so pages over an unchanged snapshot neither repeat nor skip rows. Limits default to 25 and
   clamp to 200 with a notice, log, and counter; `FAA_CLAMP_LIMITS=false` restores strict rejection.
 - **Source date.** Successful tool responses carry optional `dataAsOf` from the selected MASTER
@@ -181,11 +214,11 @@ does not apply; the design questions are ingest, indexing, and refresh instead.
 ### Backend choice — MirrorService (SQLite + FTS5)
 
 The corpus sits squarely in the embedded-SQLite tier the `MirrorService` targets (10⁴–10⁷
-rows): ~300k active `MASTER` rows, ~90k `ACFTREF`, ~3k `ENGINE`, several-hundred-thousand
+rows): ~300k active `MASTER` rows, ~90k `ACFTREF`, ~5k `ENGINE`, several-hundred-thousand
 `DEREG`, plus `RESERVED`. That rules out a pure in-memory index (too large to hold comfortably
 and to rebuild per process) and is far below the external-store threshold. SQLite + FTS5 gives
 the relational join (`MASTER`→`ACFTREF`→`ENGINE`), full-text owner/make-model search, and
-indexed exact lookups (N-number, Mode S code, mfr-model code) in one embedded file with zero
+indexed exact lookups (N-number, Mode S code, mfr-model code, serial, engine code, airworthiness class, year) in one embedded file with zero
 runtime services. `bun:sqlite` is built into the Bun runtime (the Docker base and dev
 runtime). Node uses the production dependency `better-sqlite3`, whose cross-platform
 N-API prebuilts are retained in the cleaned MCPB. The mirror is unavailable on Cloudflare Workers (no
@@ -219,9 +252,18 @@ The dataset is one ~1M-row corpus that changes daily but is queried far more tha
   retryable `mirror_loading`; cold and empty mirrors retain their distinct `ServiceUnavailable`
   diagnostics. No read can combine readiness from one generation with rows from another.
 - **Manufacturer classification.** Rebuilds classify non-type-certificated and light-sport
-  manufacturer names against primary and co-owner records from MASTER and DEREG. Matching
-  MASTER corporate/government/LLC/non-citizen-corporate registrants preserve public manufacturer
-  names. Old unresolved classifications hide names conservatively under redaction until refresh.
+  manufacturer names against primary and co-owner records from MASTER and DEREG. Names compare
+  as word sets: uppercase, split on non-alphanumeric characters; the core words drop
+  single-letter initials and JR/SR/II/III/IV. The whole builder name and each part split on
+  `/`, `&` and `+` are tested, and a name is withheld when a part has the same words, or the same
+  two or more core words, as a DEREG name, a MASTER co-owner name, or a MASTER registrant outside
+  types 3/5/7/8 on that aircraft code, or shares two or more core words with a MASTER registrant of
+  type 1/2/4/9 on that code with one core set containing the other. A MASTER corporate,
+  government, LLC or non-citizen-corporate registrant (types 3/5/7/8) with the same words as the
+  whole builder name preserves the public manufacturer name. Each MASTER or DEREG row is compared
+  only with the builder name of the code it references. Old unresolved classifications, including
+  those from a 0.2.0 index (reset by the version 3 store upgrade), hide names conservatively
+  under redaction until refresh.
 
 The `Dockerfile` pre-creates the writable `.mirror` data directory owned by the runtime user
 and copies `dist/` into the image, including the compiled lifecycle commands
@@ -244,11 +286,15 @@ registration row for fast single-call lookup, with FTS5 over the searchable text
   `expiration_date`, `unique_id`, `kit_mfr`, `kit_model`.
   - **FTS5 columns:** `owner_name`, `make`, `model`, `other_names`, `city`.
   - **Indexes:** `n_number` (unique), `mode_s_code_hex`, `mfr_mdl_code`, `state`,
-    `aircraft_type_code`, `serial_number COLLATE NOCASE`.
+    `aircraft_type_code`, `serial_number COLLATE NOCASE`, `eng_mfr_mdl_code`,
+    `airworthiness_class_code`, `year_mfr`. The last three are declarative: an existing index
+    builds them on its first open after upgrade, holding the write lock, without a rebuild or a
+    migration of their own.
 - **`aircraft_ref`** (from `ACFTREF`): `code` (PK, 6–7-char), `mfr`, `model`, `aircraft_type_code`,
   `engine_type_code`, `category_code`, `builder_cert_code`, `num_engines`, `num_seats`,
   `weight_class`, `cruise_speed`, `tc_data_sheet`, `tc_data_holder`, `manufacturer_redacted`
-  (`1` hidden, `0` classified public, `NULL` unknown on a legacy mirror).
+  (`1` hidden, `0` classified public, `NULL` unknown on a legacy mirror, or reset by the version 3
+  store upgrade for builder certification 1/2 until the next refresh).
   - **FTS5 columns:** `mfr`, `model`. **Index:** `aircraft_type_code`, `category_code`.
 - **`engine_ref`** (from `ENGINE`): `code` (PK, 5-char), `mfr`, `model`, `engine_type_code`,
   `horsepower`, `thrust`.
@@ -260,7 +306,8 @@ registration row for fast single-call lookup, with FTS5 over the searchable text
   never returned by the status/history tool. Co-owner fields are consumed for manufacturer
   classification without adding persistent owner data.
 - **`reserved`** (from `RESERVED`, status-resolution only): `n_number` (indexed),
-  `type_reservation_code`, `reserve_date`, `expiration_notice_date`, `purge_date`,
+  `type_reservation_code`, `reserve_date`, `expiration_notice_date` (RESERVED EXP DATE, the
+  reservation's expiration date), `purge_date`,
   `n_number_for_change`, plus registrant/address fields (redaction-gated).
 
 Decode tables (status code, type-registrant, type-aircraft, type-engine, region, category,
@@ -327,7 +374,7 @@ a definitive answer instead of a not-found for a known-but-inactive number.
 | # | Lookup | Purpose | Result |
 |:--|:-------|:--------|:-------|
 | 1 | `registration` table by `n_number` | Active registration? | `recordType: 'active'` → status + airworthiness + expiry |
-| 2 | `reserved` table by `n_number` | Current reservation? | `recordType: 'reserved'` → reservation type + reserve/purge dates |
+| 2 | `reserved` table by `n_number` | Current reservation? | `recordType: 'reserved'` → reservation type + reserve/expiration/purge dates |
 | 3 | `dereg` table by `n_number` | Cancellation history only? | `recordType: 'deregistered'` → latest cancellation fields |
 | — | none matched | Number absent from this snapshot | `recordType: 'unknown'` (a valid answer) |
 
@@ -498,7 +545,7 @@ other.
 ### RESERVED.txt (reserved N-numbers — 192-char record)
 
 `N-NUMBER, REGISTRANT, STREET, STREET2, CITY, STATE, ZIP CODE, RSV DATE, TR (type reservation),
-EXP DATE, N-NUM-CHG, PURGE DATE.` **PII fields:** REGISTRANT, STREET, STREET2, CITY.
+EXP DATE (the reservation's expiration date), N-NUM-CHG, PURGE DATE.` **PII fields:** REGISTRANT, STREET, STREET2, CITY.
 
 ### Decode tables
 

@@ -271,6 +271,7 @@ src/
       zip.ts  csv.ts                     # ZIP extraction + comma-delimited parsing
       decode.ts                         # static decode maps (status, type, region, category, …) applied at query time
       normalize.ts                      # N-number normalizer (strip leading N, uppercase)
+      mode-s.ts                         # Mode S (ICAO 24-bit) → N-number decoder
       schema.ts                         # sqliteMirrorStore column + FTS5 + index spec
       types.ts                          # domain types
   mcp-server/

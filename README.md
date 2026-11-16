@@ -29,7 +29,7 @@
 
 ## Overview
 
-The US civil aircraft registry, searchable offline from the FAA's Releasable Aircraft Database. Decode an N-number to its aircraft, engine, and registered owner; check its current state and cancellation history; and search by serial number, make and model, state, Mode S code, or owner when redaction is off.
+The US civil aircraft registry, searchable offline from the FAA's Releasable Aircraft Database. Decode an N-number to its aircraft, engine, and registered owner; check its current state and cancellation history; and search by serial number, make and model, engine code, airworthiness class, manufacture year, state, Mode S code, or owner when redaction is off.
 
 ### Tools
 
@@ -37,7 +37,7 @@ The US civil aircraft registry, searchable offline from the FAA's Releasable Air
 |:---|:---|
 | `faa_lookup_registration` | Decode one active N-number to aircraft, engine ratings, approved operations, registration dates, Mode S code, and registered owner when redaction is off. |
 | `faa_get_registration_status` | Resolve current state in active → reserved → deregistered order, with cancellation history for the N-number. |
-| `faa_search_registrations` | Search active registrations by serial number, owner name, make/model, exact manufacturer/model code, state, aircraft type, or Mode S code. |
+| `faa_search_registrations` | Search active registrations by serial number, owner name, make/model, exact manufacturer/model or engine code, state, aircraft type, airworthiness class, manufacture-year range, or Mode S code. |
 | `faa_search_aircraft_types` | Search the aircraft reference table by manufacturer/model name, type, or category to discover manufacturer-model codes. |
 | `faa_get_aircraft_type` | Decode a 6–7-character manufacturer/model/series code to aircraft specs — category, type, engine, seats, weight class, cruise speed, type-certificate data. |
 
@@ -76,19 +76,22 @@ The [FAA registry guide](skills/faa-aircraft-registry-guide/SKILL.md) covers mod
 
 ### `faa_search_registrations` <sub>tool</sub>
 
-- Filters: `ownerName`, `makeModel`, `manufacturerModelCode`, `serialNumber`, `state`, `aircraftType`, `modeSCode`; at least one required, combined with AND
-- Make/model terms match token prefixes, so `Cessna 172` includes variants such as 172S. Owner terms retain whole-token matching
+- Filters: `ownerName`, `makeModel`, `manufacturerModelCode`, `engineManufacturerModelCode`, `serialNumber`, `state`, `aircraftType`, `airworthinessClass`, `yearManufacturedMin`, `yearManufacturedMax`, `modeSCode`; at least one required, combined with AND
+- `engineManufacturerModelCode` is the exact five-digit FAA engine code (leading zeros significant), taken from `faa_lookup_registration` or a search result. `airworthinessClass` is one code from 1 (Standard) to 9 (Light Sport). The year bounds are inclusive four-digit years; registrations with no recorded year never match
+- Each result carries `engineManufacturerModelCode` and `airworthinessClass` (code and label; a stored `0` keeps its code with no label)
+- When `modeSCode` matches nothing, the notice states which N-number a US address encodes, and `encodedNNumber` carries it for `faa_get_registration_status`; an address that encodes none (outside A00000–AFFFFF, or in it but unassigned) gets a sentence saying so
+- Make/model terms match token prefixes, so `Cessna 172` includes variants such as 172S. A term with 1–4 boundaries (a separator, or a letter/digit change) also matches its other join/split spellings: `PA28` and `PA-28`, `PA-32R` and `PA32R`, `UH-1H` and `UH1H` find the same rows. The term as typed always remains an alternative; terms with no boundary or more than four match as typed, and a joined digit run is never split (`PA28181` does not find `PA-28-181`). A search adds at most 20 spelling variants, in term order; a term whose variants exceed what remains matches as typed. Terms with no letter or digit are ignored (`cessna - 172` = `cessna 172`) and a repeated term is matched once. Owner terms keep whole-token matching as typed, with no expansion
 - Serial matching is exact after trimming and ignores case; leading zeros, punctuation, and internal spaces remain significant. Serials can repeat across manufacturers; combine with a model filter to narrow them
 - `limit` defaults to 25 and clamps to 200 with a notice; `FAA_CLAMP_LIMITS=false` rejects larger requests. Responses report `totalCount` and `nextOffset` for `offset` paging
 - Each result carries an N-number to pass to `faa_lookup_registration`
-- Errors: `no_filters`, `invalid_code`, `invalid_state`, `invalid_mode_s_code`, `invalid_aircraft_type`, and `owner_search_disabled` (owner-name search is off while `FAA_REDACT_OWNER_PII` is on)
+- Errors: `no_filters`, `invalid_code`, `invalid_state`, `invalid_mode_s_code`, `invalid_aircraft_type`, `invalid_engine_code`, `invalid_airworthiness_class`, `invalid_year_range`, and `owner_search_disabled` (owner-name search is off while `FAA_REDACT_OWNER_PII` is on)
 
 ---
 
 ### `faa_search_aircraft_types` <sub>tool</sub>
 
-- Filters: `query` (manufacturer/model token prefixes), `aircraftType` (1–9/H/O), `category` (1–3); at least one required
-- Returns summaries with the code to pass to `faa_get_aircraft_type` or `faa_search_registrations.manufacturerModelCode`
+- Filters: `query` (manufacturer/model token prefixes, with the same join/split designator spellings as `makeModel`), `aircraftType` (1–9/H/O), `category` (1–3); at least one required
+- Returns summaries with the code to pass to `faa_get_aircraft_type` or `faa_search_registrations.manufacturerModelCode`, ordered by manufacturer, model, then code, with withheld manufacturers last
 - `limit` defaults to 25 and clamps to 200 with a notice; `FAA_CLAMP_LIMITS=false` rejects larger requests. Responses report `totalCount` and `nextOffset` for `offset` paging
 - Errors: `no_filters`, `invalid_aircraft_type`, `invalid_category`
 
@@ -239,7 +242,7 @@ FAA_MIRROR_PATH=/path/to/faa-registry.db node dist/cli/faa-mirror-refresh.js
 
 - **Keep the path stable.** Point `FAA_MIRROR_PATH` (and the same env var in your MCP client config) at a persistent location so the built index is reused across runs. Default: `.mirror/faa-registry.db`.
 - **Daily refresh.** Under HTTP transport the server schedules a daily `mirror:refresh`. From the first table replacement until successful completion, queries return retryable `ServiceUnavailable` (`mirror_loading`). An interrupted rebuild stays unavailable until a refresh succeeds. A download or archive-manifest failure before replacement preserves the complete index. Under stdio, run `mirror:refresh` out-of-band (e.g. a cron job).
-- **Existing indexes.** Run `mirror:refresh` after upgrading to populate manufacturer classification, source date, and cancellation fields. Until classification is known, redacted queries conservatively withhold non-type-certificated manufacturer names. Use matching server and CLI versions when refreshing the same database.
+- **Existing indexes.** Run `mirror:refresh` after upgrading to populate manufacturer classification, source date, and cancellation fields. Until classification is known, redacted queries conservatively withhold non-type-certificated manufacturer names; an index built by 0.2.0 is in that state after upgrading until the next `mirror:refresh`, though model and exact-code searches still find those records. Use matching server and CLI versions when refreshing the same database. If an older server or CLI refreshes the index after a rollback, run `mirror:refresh` with the current version right after upgrading again: an older refresh rewrites builder-name classification with its own rule.
 - **Recovery after a process exit.** An immediate refresh can return `sync_locked` while the interrupted writer's lease remains valid. Wait for the lease to expire, then rerun `mirror:refresh`.
 - **Docker.** The image ships the mirror CLI and a writable `.mirror` data directory owned by the runtime user. Mount a volume there and run `mirror:init` once (e.g. `docker exec <container> bun run mirror:init`, or a one-shot init job against the shared volume) so the index persists across container restarts.
 - **Until the index exists,** every query fails with a `ServiceUnavailable` error whose recovery hint points to `mirror:init` — there is no live API to fall back to, so the cold state surfaces loudly rather than returning empty results.
