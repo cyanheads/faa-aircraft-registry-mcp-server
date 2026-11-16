@@ -7,8 +7,9 @@
  * @module tests/services/schema.test
  */
 
-import { sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
+import { type SqliteHandle, sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
 import { afterEach, describe, expect, it } from 'vitest';
+import { visibleManufacturer } from '@/services/registry/registry-search.js';
 import { withRegistrySnapshot } from '@/services/registry/registry-snapshot.js';
 import {
   AIRCRAFT_REF_FTS,
@@ -190,5 +191,120 @@ describe('auxiliaryTablesMigration — fresh-database build', () => {
     expect(() => withRegistrySnapshot(handle, () => undefined)).toThrow(
       expect.objectContaining({ data: { reason: 'mirror_not_ready' } }),
     );
+  });
+});
+
+describe('registration search-filter indexes on an existing store', () => {
+  const filterColumns = new Set(['eng_mfr_mdl_code', 'airworthiness_class_code', 'year_mfr']);
+  const filterIndexes = [
+    'registration_eng_mfr_mdl_code_idx',
+    'registration_airworthiness_class_code_idx',
+    'registration_year_mfr_idx',
+  ];
+  const indexNames = (handle: SqliteHandle) =>
+    handle
+      .prepare<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index'`)
+      .all()
+      .map(({ name }) => name);
+  const schemaVersion = (handle: SqliteHandle) =>
+    handle.prepare<{ v: number }>('SELECT MAX(version) AS v FROM schema_version').get()?.v;
+
+  it('creates the engine, class and year indexes at the next open without a version change', async () => {
+    const spec = registrationStoreSpec(tempDbPath());
+    const older = sqliteMirrorStore({
+      ...spec,
+      indexes: (spec.indexes ?? []).filter(
+        ({ columns }) => !columns.some((c) => filterColumns.has(c)),
+      ),
+    });
+    const before = await older.raw();
+    before.exec(`
+      INSERT INTO registration (n_number, eng_mfr_mdl_code, airworthiness_class_code, year_mfr)
+      VALUES ('12345', '01234', '4', 1975);
+    `);
+    const version = schemaVersion(before);
+    expect(version).toBe(spec.version);
+    for (const name of filterIndexes) expect(indexNames(before)).not.toContain(name);
+    await older.close();
+
+    const upgraded = sqliteMirrorStore(spec);
+    try {
+      const handle = await upgraded.raw();
+      expect(indexNames(handle)).toEqual(expect.arrayContaining(filterIndexes));
+      expect(schemaVersion(handle)).toBe(version);
+      expect(
+        handle
+          .prepare('SELECT n_number FROM registration WHERE eng_mfr_mdl_code = ? AND year_mfr >= ?')
+          .all('01234', 1975),
+      ).toEqual([{ n_number: '12345' }]);
+    } finally {
+      await upgraded.close();
+    }
+  });
+});
+
+describe('builder classification reset on upgrade from version 2', () => {
+  const classification = (handle: SqliteHandle) =>
+    handle
+      .prepare<{ code: string; flag: number | null; make: string | null }>(
+        `SELECT code, manufacturer_redacted AS flag, ${visibleManufacturer('ref.mfr', true)} AS make
+           FROM aircraft_ref AS ref ORDER BY code`,
+      )
+      .all();
+  const version = (handle: SqliteHandle) =>
+    handle.prepare<{ v: number }>('SELECT MAX(version) AS v FROM schema_version').get()?.v;
+
+  it('withholds every non-type-certificated name a version 2 store classified', async () => {
+    const spec = registrationStoreSpec(tempDbPath());
+    const v2 = sqliteMirrorStore({
+      ...spec,
+      version: 2,
+      migrations: spec.migrations?.filter((migration) => migration.version <= 2) ?? [],
+    });
+    const old = await v2.raw();
+    old.exec(`
+      INSERT INTO aircraft_ref (code, mfr, builder_cert_code, manufacturer_redacted) VALUES
+        ('3230000', 'CERTIFIED MAKER', '0', 0),
+        ('3230001', 'JOHN A SMITH', '1', 0),
+        ('3230002', 'PUBLIC KIT WORKS', '2', 0),
+        ('3230003', 'DOE JANE', '1', 1),
+        ('3230004', 'UNCODED MAKER', NULL, NULL);
+    `);
+    expect(version(old)).toBe(2);
+    await v2.close();
+
+    const upgraded = sqliteMirrorStore(spec);
+    try {
+      const handle = await upgraded.raw();
+      expect(version(handle)).toBe(3);
+      expect(classification(handle)).toEqual([
+        { code: '3230000', flag: 0, make: 'CERTIFIED MAKER' },
+        { code: '3230001', flag: null, make: null },
+        { code: '3230002', flag: null, make: null },
+        { code: '3230003', flag: null, make: null },
+        { code: '3230004', flag: null, make: null },
+      ]);
+    } finally {
+      await upgraded.close();
+    }
+  });
+
+  it('keeps a version 3 classification across reopen', async () => {
+    const path = tempDbPath();
+    const first = sqliteMirrorStore(registrationStoreSpec(path));
+    (await first.raw()).exec(`
+      INSERT INTO aircraft_ref (code, mfr, builder_cert_code, manufacturer_redacted)
+      VALUES ('3230001', 'PUBLIC KIT WORKS', '1', 0);
+    `);
+    await first.close();
+
+    const reopened = sqliteMirrorStore(registrationStoreSpec(path));
+    try {
+      expect(classification(await reopened.raw())).toEqual([
+        { code: '3230001', flag: 0, make: 'PUBLIC KIT WORKS' },
+      ]);
+    } finally {
+      await reopened.close();
+    }
   });
 });

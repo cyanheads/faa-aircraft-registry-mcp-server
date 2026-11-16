@@ -493,3 +493,181 @@ describe('manufacturer classification and cancellation fields', () => {
     }
   });
 });
+
+/**
+ * Builder names compared as word sets. Each ACFTREF code carries one case; the
+ * MASTER and DEREG rows reference it with the registrant evidence the case needs.
+ */
+describe('builder names that reorder or abbreviate a registrant name', () => {
+  const acftref = [
+    'CODE,MFR,MODEL,BUILD-CERT-IND',
+    '3210001,JOHN A SMITH,MX,1',
+    '3210002,JANE DOE,MX,1',
+    '3210003,RICHARD K ROE,MX,2',
+    '3210004,PAUL D CANNON,MX,1',
+    '3210005,PETER ADAMS/MARIA LOPEZ,MX,1',
+    '3210006,WILLIAM SMITH JR,MX,1',
+    '3210007,MARY K JONES,MX,1',
+    '3210008,CHARLES PERRY THOMAS,MX,1',
+    '3210009,ANN LEE & TOM LEE,MX,2',
+    '3210020,NORTH STAR,MX,1',
+    '3210021,BLUE SKY BALLOONS,MX,2',
+    '3210022,K-TWO AIRCRAFT INC,MX,1',
+    '3210023,JOHN A SMITH,MX,0',
+    '3210024,SMITH,MX,1',
+    '3210025,ROBERT LEE GREEN,MX,1',
+    '3210026,OAK RIVER FLYERS,MX,1',
+    '3210027,EAGLE GLIDER CLUB NO 3,MX,1',
+    '3210028,---,MX,1',
+  ];
+  const master = [
+    'N-NUMBER,MFR MDL CODE,NAME,OTHER NAMES(1),TYPE REGISTRANT',
+    '32001,3210001,SMITH JOHN A,,1',
+    '32002,3210002,DOE JANE M,,1',
+    '32003,3210003,ROE RICHARD,,1',
+    '32004,3210004,CANNON PAUL DOUGLAS,,4',
+    '32005,3210005,LOPEZ MARIA T,,1',
+    '32007,3210007,UNRELATED PILOT,JONES MARY K,1',
+    '32008,3210008,THOMAS CHARLES P,,2',
+    '32021,3210021,UNRELATED PILOT,BLUE SKY BALLOONS INTL,1',
+    '32022,3210022,K TWO AIRCRAFT INC,,3',
+    '32023,3210023,SMITH JOHN A,,1',
+    '32024,3210024,SMITH JOHN A,,1',
+    '32025,3210025,GREEN ROBERT,,',
+    '32026,3210026,OAK RIVER FLYERS LLC,,7',
+  ];
+  const dereg = [
+    'N-NUMBER,MFR-MDL-CODE,NAME,OTHER-NAMES(1)',
+    '42006,3210006,SMITH WILLIAM,',
+    '42009,3210009,UNRELATED PILOT,LEE TOM',
+    '42020,3210020,NORTH STAR AVIATION INC,',
+    '42022,3210022,K-TWO AIRCRAFT INC,',
+    '42027,3210027,EAGLE GLIDER CLUB NO 4,',
+    '42028,3210028,---,',
+  ];
+  let flags: Map<string, number | null>;
+
+  beforeAll(async () => {
+    const mirror = createRegistryMirror({
+      mirrorPath: tempDbPath(),
+      databaseUrl: 'https://example.invalid/registry.zip',
+    });
+    const zip = makeZip([
+      { name: 'ENGINE.txt', data: Buffer.from(engineTxt) },
+      { name: 'RESERVED.txt', data: Buffer.from(reservedTxt) },
+      { name: 'ACFTREF.txt', data: Buffer.from(acftref.join('\n')) },
+      { name: 'DEREG.txt', data: Buffer.from(dereg.join('\n')) },
+      { name: 'MASTER.txt', data: Buffer.from(master.join('\n')) },
+    ]);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(zip));
+    try {
+      await mirror.runSync({ mode: 'init' });
+      const handle = await mirror.raw();
+      const rows = handle
+        .prepare<{ code: string; manufacturer_redacted: number | null }>(
+          'SELECT code, manufacturer_redacted FROM aircraft_ref',
+        )
+        .all();
+      flags = new Map(rows.map((row) => [row.code, row.manufacturer_redacted]));
+    } finally {
+      fetch.mockRestore();
+      await mirror.close();
+    }
+  });
+
+  it.each([
+    ['3210001', 'a reordered registrant name'],
+    ['3210002', 'a builder missing the registrant middle initial'],
+    ['3210003', 'a builder adding a middle initial'],
+    ['3210004', 'an initial against a full middle name (co-owned registrant)'],
+    ['3210005', 'one person in a /-joined builder pair'],
+    ['3210006', 'a DEREG registrant with the same core words'],
+    ['3210007', 'a MASTER co-owner with the same words'],
+    ['3210008', 'a partnership registrant whose core words the builder contains'],
+    ['3210009', 'one person in an &-joined pair against a DEREG co-owner'],
+  ])('withholds %s: %s', (code) => {
+    expect(flags.get(code)).toBe(1);
+  });
+
+  it.each([
+    ['3210020', 'a builder name a DEREG registrant name merely contains'],
+    ['3210021', 'a builder name a co-owner name merely contains'],
+    ['3210023', 'a type-certificated manufacturer'],
+    ['3210024', 'a one-word builder name'],
+    ['3210025', 'a builder containing an untyped MASTER registrant name'],
+    ['3210026', 'a builder an organization registrant name contains'],
+    ['3210027', 'a club differing only by its number'],
+  ])('keeps %s public: %s', (code) => {
+    expect(flags.get(code)).toBe(0);
+  });
+
+  it('keeps a name public when an organization registrant has the same words, despite a DEREG match', () => {
+    expect(flags.get('3210022')).toBe(0);
+  });
+
+  it('never matches a builder name without letters or digits', () => {
+    expect(flags.get('3210028')).toBe(0);
+  });
+});
+
+describe('index built before word-set classification', () => {
+  it('withholds every non-type-certificated name until a refresh classifies it again', async () => {
+    const mirrorPath = tempDbPath();
+    const databaseUrl = 'https://example.invalid/registry.zip';
+    const zip = makeZip([
+      { name: 'ENGINE.txt', data: Buffer.from(engineTxt) },
+      { name: 'RESERVED.txt', data: Buffer.from(reservedTxt) },
+      {
+        name: 'ACFTREF.txt',
+        data: Buffer.from(
+          [
+            'CODE,MFR,MODEL,BUILD-CERT-IND',
+            '3220001,JOHN A SMITH,MX,1',
+            '3220002,PUBLIC KIT WORKS,MX,2',
+            '3220003,CERTIFIED MAKER,MX,0',
+          ].join('\n'),
+        ),
+      },
+      { name: 'DEREG.txt', data: Buffer.from('N-NUMBER\n') },
+      {
+        name: 'MASTER.txt',
+        data: Buffer.from(
+          'N-NUMBER,MFR MDL CODE,NAME,TYPE REGISTRANT\n32201,3220001,SMITH JOHN A,1\n',
+        ),
+      },
+    ]);
+    const readFlags = (handle: Awaited<ReturnType<Mirror['raw']>>) =>
+      handle
+        .prepare<{ manufacturer_redacted: number | null }>(
+          'SELECT manufacturer_redacted FROM aircraft_ref ORDER BY code',
+        )
+        .all()
+        .map((row) => row.manufacturer_redacted);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(zip));
+    try {
+      const builder = createRegistryMirror({ mirrorPath, databaseUrl });
+      await builder.runSync({ mode: 'init' });
+      // Recreate what a 0.2.0 rebuild left behind: every name classified public
+      // by exact string comparison, at schema version 2.
+      const old = await builder.raw();
+      old.exec(`
+        UPDATE aircraft_ref SET manufacturer_redacted = 0;
+        DELETE FROM schema_version;
+        INSERT INTO schema_version (version, applied_at) VALUES (2, '2026-11-13T00:00:00Z');
+      `);
+      await builder.close();
+
+      const upgraded = createRegistryMirror({ mirrorPath, databaseUrl });
+      try {
+        const handle = await upgraded.raw();
+        expect(readFlags(handle)).toEqual([null, null, 0]);
+        await upgraded.runSync({ mode: 'refresh' });
+        expect(readFlags(handle)).toEqual([1, 0, 0]);
+      } finally {
+        await upgraded.close();
+      }
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+});

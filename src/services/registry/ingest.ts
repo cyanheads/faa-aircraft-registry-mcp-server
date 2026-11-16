@@ -84,7 +84,6 @@ interface AircraftRef {
   aircraftTypeCode: string | undefined;
   builderCertCode: string | undefined;
   engineTypeCode: string | undefined;
-  manufacturerKey: string | undefined;
   manufacturerMatch?: 'owner' | 'organization';
   mfr: string | undefined;
   model: string | undefined;
@@ -257,16 +256,7 @@ function ingestAircraftRef(
     const aircraftTypeCode = cleanField(pick(row, 'TYPE-ACFT', 'TYPE ACFT', 'TYPE-AIRCRAFT'));
     const engineTypeCode = cleanField(pick(row, 'TYPE-ENG', 'TYPE ENG', 'TYPE-ENGINE'));
     const builderCertCode = cleanField(pick(row, 'BUILD-CERT-IND', 'BUILD CERT IND'));
-    const manufacturerKey =
-      builderCertCode === '1' || builderCertCode === '2' ? nameKey(mfr) : undefined;
-    map.set(code, {
-      mfr,
-      model,
-      aircraftTypeCode,
-      engineTypeCode,
-      builderCertCode,
-      manufacturerKey,
-    });
+    map.set(code, { mfr, model, aircraftTypeCode, engineTypeCode, builderCertCode });
     insert.run(
       code,
       mfr ?? null,
@@ -402,22 +392,99 @@ const OTHER_NAME_HEADERS = Array.from({ length: 5 }, (_, index) => {
   const i = index + 1;
   return [`OTHER NAMES(${i})`, `OTHER-NAMES(${i})`, `OTHER NAMES ${i}`, `OTHER-NAMES-${i}`];
 });
+/** Corporation, government, LLC and non-citizen corporation registrants. */
 const ORGANIZATION_TYPES = new Set(['3', '5', '7', '8']);
+/**
+ * Individual, partnership, co-owned and non-citizen co-owned registrants: the
+ * only names that may contain, or be contained in, a builder name. DEREG and
+ * co-owner names carry no registrant type, and containment against them matches
+ * manufacturer and institution names.
+ */
+const CONTAINMENT_TYPES = new Set(['1', '2', '4', '9']);
+const NAME_SUFFIXES = new Set(['JR', 'SR', 'II', 'III', 'IV']);
+const INITIAL = /^[A-Z]$/;
 
-function nameKey(name: string | undefined): string | undefined {
-  return cleanField(name)?.toUpperCase();
+/**
+ * A name reduced to the words classification compares: uppercase, split on every
+ * run of characters other than A–Z and 0–9, as a set. `core` drops single-letter
+ * initials and generational suffixes. Keys join the sorted distinct words, so two
+ * names with the same set have the same key.
+ */
+interface NameWords {
+  core: readonly string[];
+  coreKey: string;
+  key: string;
 }
 
-/** Record only the evidence outcome for this code, with MASTER organizations winning. */
+type BuilderParts = readonly [NameWords, ...NameWords[]];
+
+function nameWords(name: string | undefined): NameWords | undefined {
+  if (!name) return;
+  const words = [...new Set(name.toUpperCase().split(/[^A-Z0-9]+/))].filter(Boolean).sort();
+  if (words.length === 0) return;
+  const core = words.filter((word) => !INITIAL.test(word) && !NAME_SUFFIXES.has(word));
+  return { key: words.join(' '), core, coreKey: core.join(' ') };
+}
+
+/** The whole builder name, then each part around `/`, `&` or `+` when it names several. */
+function builderNameParts(mfr: string | undefined): BuilderParts | undefined {
+  const whole = nameWords(mfr);
+  if (!mfr || !whole) return;
+  const parts = mfr.split(/[/&+]/).flatMap((part) => nameWords(part) ?? []);
+  return parts.length > 1 ? [whole, ...parts] : [whole];
+}
+
+/**
+ * Whether a builder part names the person `name` names: the same words, or the
+ * same two or more core words. With `containment`, also two or more shared core
+ * words where one core set contains the other.
+ */
+function namesPerson(
+  parts: readonly NameWords[],
+  name: string | undefined,
+  containment: boolean,
+): boolean {
+  const person = nameWords(name);
+  if (!person) return false;
+  return parts.some((part) => {
+    if (part.key === person.key || (part.core.length >= 2 && part.coreKey === person.coreKey)) {
+      return true;
+    }
+    if (!containment) return false;
+    const [small, large] =
+      part.core.length <= person.core.length ? [part.core, person.core] : [person.core, part.core];
+    return small.length >= 2 && small.every((word) => large.includes(word));
+  });
+}
+
+/**
+ * Record only the evidence outcome for a non-type-certificated code: `owner` when
+ * a registrant or co-owner name on a row for the code names the same person as
+ * the builder, and `organization` (which wins permanently) when a MASTER
+ * organization registrant has the same words as the whole builder name. The
+ * builder's words are derived per row rather than kept on every reference: held
+ * for the whole rebuild, they grow the heap each batch-boundary collection walks.
+ */
 function classifyManufacturer(ref: AircraftRef, row: CsvRow, master: boolean): void {
-  const key = ref.manufacturerKey;
-  if (!key || ref.manufacturerMatch === 'organization') return;
-  if (nameKey(row.NAME) === key) {
-    const type = master ? cleanField(pick(row, 'TYPE REGISTRANT', 'TYPE-REGISTRANT')) : undefined;
-    ref.manufacturerMatch = type && ORGANIZATION_TYPES.has(type) ? 'organization' : 'owner';
-  } else if (
+  if (ref.builderCertCode !== '1' && ref.builderCertCode !== '2') return;
+  if (ref.manufacturerMatch === 'organization') return;
+  const type = master ? cleanField(pick(row, 'TYPE REGISTRANT', 'TYPE-REGISTRANT')) : undefined;
+  const organization = type !== undefined && ORGANIZATION_TYPES.has(type);
+  if (ref.manufacturerMatch === 'owner' && !organization) return;
+  const parts = builderNameParts(ref.mfr);
+  if (!parts) return;
+  if (organization) {
+    if (nameWords(row.NAME)?.key === parts[0].key) {
+      ref.manufacturerMatch = 'organization';
+      return;
+    }
+  } else if (namesPerson(parts, row.NAME, type !== undefined && CONTAINMENT_TYPES.has(type))) {
+    ref.manufacturerMatch = 'owner';
+    return;
+  }
+  if (
     ref.manufacturerMatch !== 'owner' &&
-    OTHER_NAME_HEADERS.some((headers) => nameKey(pick(row, ...headers)) === key)
+    OTHER_NAME_HEADERS.some((headers) => namesPerson(parts, pick(row, ...headers), false))
   ) {
     ref.manufacturerMatch = 'owner';
   }

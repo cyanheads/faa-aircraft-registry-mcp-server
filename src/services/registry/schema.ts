@@ -50,7 +50,7 @@ export function registrationStoreSpec(path: string): SqliteMirrorStoreSpec {
     path,
     table: REGISTRATION_TABLE,
     primaryKey: 'n_number',
-    version: 2,
+    version: 3,
     columns: {
       n_number: 'TEXT',
       serial_number: 'TEXT',
@@ -94,8 +94,17 @@ export function registrationStoreSpec(path: string): SqliteMirrorStoreSpec {
       { columns: ['mfr_mdl_code'] },
       { columns: ['state'] },
       { columns: ['aircraft_type_code'] },
+      // Declarative entries are created on every open, so an existing store gains
+      // them at its next open without a migration or a rebuild.
+      { columns: ['eng_mfr_mdl_code'] },
+      { columns: ['airworthiness_class_code'] },
+      { columns: ['year_mfr'] },
     ],
-    migrations: [auxiliaryTablesMigration(), { version: 2, up: upgradeRegistryTables }],
+    migrations: [
+      auxiliaryTablesMigration(),
+      { version: 2, up: upgradeRegistryTables },
+      { version: 3, up: resetBuilderClassification },
+    ],
   };
 }
 
@@ -229,5 +238,18 @@ function upgradeRegistryTables(handle: SqliteHandle): void {
           AND lease.generation = ${REGISTRY_GENERATION_TABLE}.generation
       );
     END;
+  `);
+}
+
+/**
+ * Builder names are compared as word sets from version 3. A version 2 rebuild
+ * classified non-type-certificated names by exact string, so its `0` (public)
+ * no longer proves a name is not an owner's: return those codes to unknown,
+ * which redaction withholds until the next rebuild classifies them again.
+ */
+function resetBuilderClassification(handle: SqliteHandle): void {
+  handle.exec(`
+    UPDATE ${AIRCRAFT_REF_TABLE} SET manufacturer_redacted = NULL
+    WHERE builder_cert_code IN ('1', '2');
   `);
 }
