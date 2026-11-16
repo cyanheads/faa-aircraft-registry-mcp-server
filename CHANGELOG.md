@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-11-15 · 🛡️ Security
+
+Builder names that match a current or former registrant are withheld under redaction even when reordered or abbreviated. Adds Mode S decoding for unmatched addresses, interchangeable hyphenated and joined designators, and engine, airworthiness class and manufacture-year filters.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-11-10 · 🛡️ Security
 
 Query complete FAA registry snapshots with the source date and an N-number's cancellation history.
