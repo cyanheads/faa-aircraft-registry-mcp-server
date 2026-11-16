@@ -111,7 +111,7 @@ export const getRegistrationStatusTool = tool('faa_get_registration_status', {
     expirationNoticeDate: z
       .string()
       .optional()
-      .describe('Date an expiration notice was sent, YYYY-MM-DD (reserved records).'),
+      .describe('Reservation expiration date (FAA EXP DATE), YYYY-MM-DD (reserved records).'),
     purgeDate: z
       .string()
       .optional()
@@ -191,7 +191,7 @@ export const getRegistrationStatusTool = tool('faa_get_registration_status', {
     push(renderCoded('Reservation type', r.typeReservation));
     if (r.reserveDate) push(`**Reserved:** ${escapeMarkdownInline(r.reserveDate)}`);
     if (r.expirationNoticeDate)
-      push(`**Expiration notice sent:** ${escapeMarkdownInline(r.expirationNoticeDate)}`);
+      push(`**Reservation expiration:** ${escapeMarkdownInline(r.expirationNoticeDate)}`);
     if (r.purgeDate) push(`**Purge date:** ${escapeMarkdownInline(r.purgeDate)}`);
     if (r.nNumberForChange)
       push(`**N-number for change:** ${escapeMarkdownInline(r.nNumberForChange)}`);

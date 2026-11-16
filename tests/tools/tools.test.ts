@@ -15,7 +15,11 @@ import { getRegistrationStatusTool } from '@/mcp-server/tools/definitions/get-re
 import { lookupRegistrationTool } from '@/mcp-server/tools/definitions/lookup-registration.tool.js';
 import { searchAircraftTypesTool } from '@/mcp-server/tools/definitions/search-aircraft-types.tool.js';
 import { searchRegistrationsTool } from '@/mcp-server/tools/definitions/search-registrations.tool.js';
-import { initRegistryService, resetRegistryService } from '@/services/registry/registry-service.js';
+import {
+  getRegistryService,
+  initRegistryService,
+  resetRegistryService,
+} from '@/services/registry/registry-service.js';
 import { buildFixtureDb, tempDbPath } from '../fixtures/build-fixture-db.js';
 
 /** A mock context carrying a tool's own error contract so `ctx.fail` is typed/wired. */
@@ -147,6 +151,62 @@ describe('faa_search_registrations — redaction-gated owner search', () => {
     ).rejects.toMatchObject({
       data: { reason: 'no_filters' },
     });
+  });
+});
+
+/**
+ * Engine code, airworthiness class and year bounds each satisfy the
+ * at-least-one-filter rule alone, and blank strings stay unset. Value
+ * validation is tabled at the service seam in registry-query.test.ts.
+ */
+describe('faa_search_registrations — engine, airworthiness and year filters', () => {
+  beforeAll(() => initService(true));
+  afterAll(() => resetRegistryService());
+
+  it.each([
+    { engineManufacturerModelCode: ' 41514 ' },
+    { airworthinessClass: ' 1 ' },
+    { yearManufacturedMin: 2008 },
+    { yearManufacturedMax: 2015 },
+  ])('runs with %j as the only filter', async (filter) => {
+    const out = await searchRegistrationsTool.handler(
+      { ...filter, limit: 25, offset: 0 },
+      searchCtx,
+    );
+    expect(out.registrations.map(({ nNumber }) => nNumber)).toEqual(['12345', '5RP']);
+  });
+
+  it('treats blank engine and class strings as unset', async () => {
+    await expect(
+      searchRegistrationsTool.handler(
+        { engineManufacturerModelCode: ' ', airworthinessClass: '', limit: 25, offset: 0 },
+        searchCtx,
+      ),
+    ).rejects.toMatchObject({ data: { reason: 'no_filters' } });
+  });
+
+  it('renders the stored engine code and class in effective output and text', async () => {
+    const enrichCtx = createMockContext({ errors: searchRegistrationsTool.errors });
+    const out = await searchRegistrationsTool.handler(
+      { yearManufacturedMax: 2010, limit: 25, offset: 0 },
+      enrichCtx,
+    );
+    expect(out.registrations).toEqual([
+      expect.objectContaining({
+        nNumber: '12345',
+        yearManufactured: 2008,
+        engineManufacturerModelCode: '41514',
+        airworthinessClass: { code: '1', label: 'Standard' },
+      }),
+    ]);
+    const effectiveSchema = searchRegistrationsTool.output.extend(
+      searchRegistrationsTool.enrichment ?? {},
+    );
+    expect(() => effectiveSchema.parse({ ...out, ...getEnrichment(enrichCtx) })).not.toThrow();
+    const block = searchRegistrationsTool.format?.(out)[0];
+    const text = block?.type === 'text' ? block.text : '';
+    expect(text).toContain('Engine mfr/model code: 41514');
+    expect(text).toContain('Airworthiness class: Standard (1)');
   });
 });
 
@@ -385,6 +445,51 @@ describe('faa_get_registration_status — flat discriminated output', () => {
     await expect(
       getRegistrationStatusTool.handler({ nNumber: 'BANANA' }, statusCtx),
     ).rejects.toMatchObject({ data: { reason: 'invalid_n_number' } });
+  });
+});
+
+/**
+ * RESERVED's EXP DATE is the date the reservation lapses, often still ahead —
+ * not the date an expiration notice went out.
+ */
+describe('faa_get_registration_status — reservation expiration date', () => {
+  beforeAll(() => initService(true));
+  afterAll(() => resetRegistryService());
+
+  it('describes expirationNoticeDate as the reservation expiration date', () => {
+    const { description } = getRegistrationStatusTool.output.shape.expirationNoticeDate;
+    expect(description).toContain('Reservation expiration date');
+    expect(description).toContain('EXP DATE');
+    expect(description).not.toMatch(/notice (was )?sent/i);
+  });
+
+  it('renders EXP DATE as the reservation expiration on both surfaces', async () => {
+    const handle = await getRegistryService().mirrorInstance.raw();
+    const setDate = handle.prepare(
+      'UPDATE reserved SET expiration_notice_date = ? WHERE n_number = ?',
+    );
+    setDate.run('2027-02-28', '777RZ');
+    try {
+      const result = await runToolContract(getRegistrationStatusTool, { nNumber: 'N777RZ' });
+      expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        recordType: 'reserved',
+        expirationNoticeDate: '2027-02-28',
+      });
+      const content = JSON.stringify(result.content);
+      expect(content).toContain('**Reservation expiration:** 2027-02-28');
+      expect(content).not.toMatch(/notice (was )?sent/i);
+    } finally {
+      setDate.run(null, '777RZ');
+    }
+  });
+
+  it('renders no expiration line for a reservation without EXP DATE', async () => {
+    const result = await runToolContract(getRegistrationStatusTool, { nNumber: 'N777RZ' });
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ recordType: 'reserved' });
+    expect(result.structuredContent).not.toHaveProperty('expirationNoticeDate');
+    expect(JSON.stringify(result.content)).not.toMatch(/expiration/i);
   });
 });
 
